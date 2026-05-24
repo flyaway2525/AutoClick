@@ -23,8 +23,10 @@ Windows のタスクトレイに常駐し、トレイアイコンのクリック
 AutoClick/
 ├── clicker.py                  # クリックロジック本体
 ├── tray_app.py                 # タスクトレイ UI・スレッド管理
+├── autoclick_config.json       # クリック設定（テンプレート・閾値など）
 ├── start.bat                   # アプリ起動スクリプト（ウィンドウなし）
-├── start_test.bat              # テスト用ボタンウィンドウ起動スクリプト
+├── start_test_button.bat       # テスト用ボタンウィンドウ起動スクリプト
+├── setup_venv.bat              # .venv 作成と依存インストール
 ├── images/
 │   ├── button_1.png            # クリック対象テンプレート画像（例）
 │   ├── test-left-button.png    # テスト用 Left ボタン画像
@@ -43,6 +45,14 @@ AutoClick/
 - Python 3.10 以上
 
 ### インストール手順
+
+まず以下を実行してください（推奨）。
+
+```bat
+setup_venv.bat
+```
+
+手動で行う場合:
 
 ```bat
 :: 仮想環境を作成
@@ -67,36 +77,53 @@ pip install pyautogui opencv-python numpy keyboard pillow pystray
 
 ```
 images/
-└── my_button.png   ← 追加するテンプレート
+└── my_button.png   ← 追加するテンプレート（ボタン名は my_button）
 ```
 
-### 2. `clicker.py` の設定を編集する
+### 2. `autoclick_config.json` の設定を編集する
 
-ファイル先頭の設定ブロックを編集します。
+通常はトレイメニューの **設定** から UI で編集します。  
+（必要なら `autoclick_config.json` を直接編集しても動作します）
 
-```python
-# ===== 設定 =====
-templates = [
-    "images/my_button.png",   # クリック対象テンプレート画像のパス（複数指定可）
-]
-threshold     = 0.7   # マッチング閾値 (0.0〜1.0)  高いほど厳密
-click_interval = 0.2  # ボタン1つをクリックした後の待機時間（秒）
-set_interval   = 0.2  # テンプレート全巡後の待機時間（秒）
-# ================
+```json
+{
+    "button_names": [],
+    "templates": ["my_button.png"],
+    "candidate_templates": ["C:/GitHub/AutoClick/AutoClick/images/my_button.png"],
+    "threshold": 0.7,
+    "click_interval": 0.2,
+    "set_interval": 0.2,
+    "scale_min": 0.8,
+    "scale_max": 1.2,
+    "scale_step": 0.05,
+    "min_template_size": 10
+}
 ```
 
 | パラメータ | 説明 | 推奨値 |
 |---|---|---|
-| `templates` | テンプレート画像パスのリスト | — |
+| `templates` | 検出対象の画像ファイル名一覧 | — |
+| `candidate_templates` | 設定UIの候補画像一覧（絶対パス推奨） | — |
+| `button_names` | 旧方式との互換項目（通常は空でOK） | — |
 | `threshold` | マッチング精度の下限。低すぎると誤検知、高すぎると見逃し | `0.7` ～ `0.85` |
 | `click_interval` | 各クリック後のスリープ秒数。0 にすると連打 | `0.1` ～ `0.5` |
 | `set_interval` | 全テンプレートを1巡した後のスリープ秒数 | `0.1` ～ `1.0` |
+| `scale_min` / `scale_max` / `scale_step` | マルチスケール探索の範囲・刻み | `0.8` / `1.2` / `0.05` |
+| `min_template_size` | スケール後の最小テンプレートサイズ（px） | `10` |
 
-### 3. アプリを起動する
+設定変更はトレイメニューの **設定** から設定UIを開き、**保存して適用** で即時反映されます。  
+**デフォルトに戻す** でフォーム値を初期設定に戻せます（保存はまだ行われません）。
+設定UIでは、**参照...** で候補画像を登録し、**選択画像を追加** で有効化対象へ追加します。候補一覧・有効化対象一覧の両方から不要画像を除外できます。  
+有効化対象一覧はファイル名のみ表示し、マウスを乗せるとフルパスを確認できます。
+
+### 3. アプリを起動する（`.venv` 必須）
 
 ```bat
 start.bat
 ```
+
+`start.bat` / `start_test_button.bat` はグローバル Python では実行しません。  
+`.venv` が無い場合は先に `setup_venv.bat` を実行してください。
 
 タスクバー右下のトレイエリアに **赤丸アイコン**（停止状態）が表示されます。
 
@@ -107,6 +134,7 @@ start.bat
 | トレイアイコンをダブルクリック | ON / OFF トグル |
 | トレイアイコン右クリック → **ON / OFF** | 同上 |
 | **ESC キー** | 動作中のみ即時停止 |
+| トレイアイコン右クリック → **設定** | 設定UIを開く（保存時に `autoclick_config.json` を再読込） |
 | トレイアイコン右クリック → **ログを開く** | ログウィンドウを表示 |
 | トレイアイコン右クリック → **終了** | アプリを終了 |
 
@@ -143,11 +171,11 @@ start.bat
 実際の画面でテンプレートマッチングが機能するか確認するための専用ウィンドウです。
 
 ```bat
-start_test.bat
+start_test_button.bat
 ```
 
 `test_tools/test_button_window.py` が起動し、**Left Button**（緑）と **Right Button**（青）が3つずつ表示されます。  
-対応するテンプレート画像（`images/test-left-button.png`、`images/test-right-button.png`）が `clicker.py` に設定された状態で AutoClick を ON にすると、これらのボタンが自動クリックされ、ウィンドウ内のカウンタが増加します。
+対応するテンプレート画像（`images/test-left-button.png`、`images/test-right-button.png`）を用意し、設定UIで `templates` に追加した状態で AutoClick を ON にすると、これらのボタンが自動クリックされ、ウィンドウ内のカウンタが増加します。
 
 ---
 

@@ -1,0 +1,16 @@
+{
+  "button_names": [],
+  "templates": [
+    "button_1.png"
+  ],
+  "candidate_templates": [
+    "C:\\GitHub\\AutoClick\\AutoClick\\images\\button_1.png"
+  ],
+  "threshold": 0.7,
+  "click_interval": 0.2,
+  "set_interval": 0.2,
+  "scale_min": 0.8,
+  "scale_max": 1.2,
+  "scale_step": 0.05,
+  "min_template_size": 10
+}
