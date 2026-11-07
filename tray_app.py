@@ -2,14 +2,89 @@ import threading
 import time
 import sys
 import ctypes
+import gc
 import json
 import os
-import tkinter as tk
-from tkinter import scrolledtext, messagebox, filedialog
-import keyboard
-from PIL import Image, ImageDraw, ImageTk
-import pystray
-import clicker
+import queue
+import traceback
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ERROR_LOG_PATH = os.path.join(APP_DIR, "autoclick_error.log")
+
+
+def show_error(message):
+    """pythonw（コンソールなし）で起動していてもエラーが分かるようにする。"""
+    print(message, file=sys.stderr)
+    try:
+        with open(ERROR_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass
+    try:
+        ctypes.windll.user32.MessageBoxW(None, message, "AutoClick", 0x10)  # MB_ICONERROR
+    except Exception:
+        pass
+
+
+try:
+    import tkinter as tk
+    from tkinter import scrolledtext, messagebox, filedialog
+    import keyboard
+    from PIL import Image, ImageDraw, ImageTk
+    import pystray
+    import clicker
+except ImportError as exc:
+    show_error(
+        f"必要なライブラリを読み込めませんでした: {exc}\n\n"
+        "setup_venv.bat を実行してから、もう一度起動してください。"
+    )
+    sys.exit(1)
+
+
+TOGGLE_HOTKEY = "f8"  # ON/OFF 切り替え（None で無効）
+STOP_HOTKEY = "esc"   # 動作中のみ停止
+
+# ===== UI スレッド =====
+# tkinter は1つのスレッドからしか触れないため、ログ・設定ウィンドウは
+# すべて専用の UI スレッド上の Toplevel として作る。他スレッドからは
+# ui_queue に依頼を積むだけにする。
+ui_queue = queue.Queue()
+ui_root = None
+
+
+def run_on_ui(func, *args):
+    ui_queue.put((func, args))
+
+
+def ui_main():
+    global ui_root
+    ui_root = tk.Tk()
+    ui_root.withdraw()
+
+    def poll():
+        while True:
+            try:
+                func, args = ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if func is None:  # 終了
+                ui_root.destroy()
+                return
+            try:
+                func(*args)
+            except Exception:
+                print(traceback.format_exc(), file=sys.stderr)
+        ui_root.after(50, poll)
+
+    ui_root.after(50, poll)
+    ui_root.mainloop()
+
+    # Tcl インタプリタはこのスレッドで解放する（別スレッドの GC に任せると
+    # "Tcl_AsyncDelete: async handler deleted by the wrong thread" で落ちる）
+    global log_window, log_text_widget, settings_window
+    log_window = log_text_widget = settings_window = ui_root = None
+    del poll
+    gc.collect()
 
 
 # ===== ログ =====
@@ -22,31 +97,32 @@ settings_window = None
 def log(msg: str):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
+    print(line, flush=True)
     with log_lock:
         log_buffer.append(line)
         if len(log_buffer) > 500:
             log_buffer.pop(0)
-    if log_text_widget:
-        try:
-            log_text_widget.after(0, _append_log, line)
-        except Exception:
-            pass
+    run_on_ui(_append_log, line)
 
 def _append_log(line: str):
+    if log_text_widget is None:
+        return
     log_text_widget.config(state="normal")
     log_text_widget.insert(tk.END, line + "\n")
+    if int(log_text_widget.index("end-1c").split(".")[0]) > 501:
+        log_text_widget.delete("1.0", "2.0")
     log_text_widget.see(tk.END)
     log_text_widget.config(state="disabled")
 
 def open_log_window(icon=None, item=None):
-    global log_window, log_text_widget
-
     def _open():
         global log_window, log_text_widget
-        if log_window and tk.Toplevel.winfo_exists(log_window):
+        if log_window is not None and log_window.winfo_exists():
+            log_window.deiconify()
             log_window.lift()
+            log_window.focus_force()
             return
-        root = tk.Tk()
+        root = tk.Toplevel(ui_root)
         root.title("AutoClick ログ")
         root.geometry("600x400")
         log_text_widget = scrolledtext.ScrolledText(root, state="disabled", font=("Consolas", 10))
@@ -67,10 +143,8 @@ def open_log_window(icon=None, item=None):
             root.destroy()
 
         root.protocol("WM_DELETE_WINDOW", on_close)
-        root.mainloop()
 
-    t = threading.Thread(target=_open, daemon=True)
-    t.start()
+    run_on_ui(_open)
 
 
 def _read_config_for_ui():
@@ -91,22 +165,22 @@ def _parse_lines(text: str):
 
 
 def open_settings_window(icon=None, item=None):
-    global settings_window
-
     def _open():
         global settings_window
-        if settings_window and tk.Toplevel.winfo_exists(settings_window):
+        if settings_window is not None and settings_window.winfo_exists():
+            settings_window.deiconify()
             settings_window.lift()
+            settings_window.focus_force()
             return
 
         project_root = os.path.dirname(clicker.CONFIG_PATH)
         config = _read_config_for_ui()
         default_config = dict(clicker.DEFAULT_CONFIG)
 
-        root = tk.Tk()
+        root = tk.Toplevel(ui_root)
         root.title("AutoClick 設定")
-        root.geometry("920x860")
-        root.minsize(920, 860)
+        root.geometry("920x940")
+        root.minsize(920, 900)
         settings_window = root
 
         frame = tk.Frame(root, padx=12, pady=12)
@@ -199,6 +273,7 @@ def open_settings_window(icon=None, item=None):
 
         def browse_image_path():
             selected_paths = filedialog.askopenfilenames(
+                parent=root,
                 title="画像ファイルを選択",
                 filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")],
             )
@@ -370,11 +445,11 @@ def open_settings_window(icon=None, item=None):
             if not p:
                 return False
             if not os.path.isfile(p):
-                messagebox.showerror("パスエラー", f"画像ファイルが見つかりません: {p}")
+                messagebox.showerror("パスエラー", f"画像ファイルが見つかりません: {p}", parent=root)
                 return False
             file_name = os.path.basename(p)
             if any(os.path.basename(existing) == file_name for existing in selected_template_paths):
-                messagebox.showwarning("重複ファイル名", f"同名ファイルが既に有効化されています: {file_name}")
+                messagebox.showwarning("重複ファイル名", f"同名ファイルが既に有効化されています: {file_name}", parent=root)
                 return False
             if p in selected_template_paths:
                 return False
@@ -385,7 +460,7 @@ def open_settings_window(icon=None, item=None):
         def add_selected_candidate_images():
             indices = candidate_listbox.curselection()
             if not indices:
-                messagebox.showwarning("選択なし", "候補画像を1件以上選択してください。")
+                messagebox.showwarning("選択なし", "候補画像を1件以上選択してください。", parent=root)
                 return
             added = 0
             last_added_index = -1
@@ -569,6 +644,39 @@ def open_settings_window(icon=None, item=None):
             1,
             is_int=True,
         )
+        get_search_downscale, set_search_downscale = add_numeric_control(
+            numeric_frame,
+            "検索縮小率",
+            "画面を縮小して候補を探してから、候補の周りだけを元の解像度で確かめます。\n"
+            "小さいほど速くなりますが、小さい画像は見逃しやすくなります（1.0 で縮小なし）。",
+            config.get("search_downscale", 0.5),
+            0.2,
+            1.0,
+            0.05,
+        )
+        get_rearm_delay, set_rearm_delay = add_numeric_control(
+            numeric_frame,
+            "再クリック待ち",
+            "クリック方式が「出現ごとに1回」のとき、対象が消えてからこの秒数たつと、\n"
+            "次に出た時にまたクリックします。",
+            config.get("rearm_delay", 0.3),
+            0.0,
+            5.0,
+            0.05,
+        )
+
+        mode_row = tk.Frame(numeric_frame)
+        mode_row.pack(fill=tk.X, pady=(0, 6))
+        mode_label = tk.Label(mode_row, text="クリック方式", width=16, anchor="w")
+        mode_label.pack(side=tk.LEFT)
+        attach_tooltip(
+            mode_label,
+            "毎周クリック: 見えている間は毎周クリックします（ボタン連打向け）。\n"
+            "出現ごとに1回: 出てきた時に1回だけクリックし、消えるまで待ちます（ポップアップ向け）。",
+        )
+        click_mode_var = tk.StringVar(value=config.get("click_mode", "repeat"))
+        tk.Radiobutton(mode_row, text="毎周クリック", variable=click_mode_var, value="repeat").pack(side=tk.LEFT)
+        tk.Radiobutton(mode_row, text="出現ごとに1回", variable=click_mode_var, value="once").pack(side=tk.LEFT, padx=(8, 0))
 
         def _default_templates(cfg):
             out = []
@@ -611,6 +719,9 @@ def open_settings_window(icon=None, item=None):
             set_scale_max(current.get("scale_max", default_config.get("scale_max", 1.2)))
             set_scale_step(current.get("scale_step", default_config.get("scale_step", 0.05)))
             set_min_template_size(current.get("min_template_size", default_config.get("min_template_size", 10)))
+            set_search_downscale(current.get("search_downscale", default_config.get("search_downscale", 0.5)))
+            set_rearm_delay(current.get("rearm_delay", default_config.get("rearm_delay", 0.3)))
+            click_mode_var.set(current.get("click_mode", default_config.get("click_mode", "repeat")))
 
         def _apply_default_numeric_values():
             set_threshold(default_config.get("threshold", 0.7))
@@ -620,9 +731,12 @@ def open_settings_window(icon=None, item=None):
             set_scale_max(default_config.get("scale_max", 1.2))
             set_scale_step(default_config.get("scale_step", 0.05))
             set_min_template_size(default_config.get("min_template_size", 10))
+            set_search_downscale(default_config.get("search_downscale", 0.5))
+            set_rearm_delay(default_config.get("rearm_delay", 0.3))
+            click_mode_var.set(default_config.get("click_mode", "repeat"))
 
         def on_reset_defaults():
-            if not messagebox.askyesno("確認", "数値設定だけをデフォルト値に戻しますか？"):
+            if not messagebox.askyesno("確認", "数値設定だけをデフォルト値に戻しますか？", parent=root):
                 return
             _apply_default_numeric_values()
             log("設定UIの数値設定をデフォルト値に戻しました（未保存）")
@@ -640,23 +754,26 @@ def open_settings_window(icon=None, item=None):
                     "scale_max": get_scale_max(),
                     "scale_step": get_scale_step(),
                     "min_template_size": get_min_template_size(),
+                    "click_mode": click_mode_var.get(),
+                    "rearm_delay": get_rearm_delay(),
+                    "search_downscale": get_search_downscale(),
                 }
             except (TypeError, ValueError):
-                messagebox.showerror("入力エラー", "数値項目の形式が正しくありません。")
+                messagebox.showerror("入力エラー", "数値項目の形式が正しくありません。", parent=root)
                 return
 
             if not payload["templates"]:
-                messagebox.showerror("入力エラー", "クリック対象画像を1件以上追加してください。")
+                messagebox.showerror("入力エラー", "クリック対象画像を1件以上追加してください。", parent=root)
                 return
 
             try:
                 with open(clicker.CONFIG_PATH, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
                 clicker.reload_config(log)
-                messagebox.showinfo("保存完了", "設定を保存して再読み込みしました。")
+                messagebox.showinfo("保存完了", "設定を保存して再読み込みしました。", parent=root)
                 log("設定UIから設定を保存しました")
             except Exception as e:
-                messagebox.showerror("保存エラー", str(e))
+                messagebox.showerror("保存エラー", str(e), parent=root)
 
         def on_close():
             global settings_window
@@ -674,17 +791,24 @@ def open_settings_window(icon=None, item=None):
         refresh_available_images()
 
         root.protocol("WM_DELETE_WINDOW", on_close)
-        root.mainloop()
 
-    t = threading.Thread(target=_open, daemon=True)
-    t.start()
+    run_on_ui(_open)
 
 # ===== 設定 =====
 # clicker.py の設定を編集してください
 # ================
 
-running = False
-worker_thread = None
+# 動作状態。ワーカーごとに専用の停止イベントを持たせることで、
+# 素早く OFF→ON しても古いワーカーが動き続けて二重クリックすることがない。
+state_lock = threading.Lock()
+current_stop = None  # 動作中のワーカーの停止イベント（OFF なら None）
+shutdown = threading.Event()
+tray_icon = None
+
+
+def is_active():
+    with state_lock:
+        return current_stop is not None
 
 
 def make_icon(active: bool) -> Image.Image:
@@ -704,46 +828,82 @@ def make_icon(active: bool) -> Image.Image:
     return img
 
 
-def auto_click_loop():
-    clicker.run(lambda: running, log)
+def update_tray_icon():
+    if tray_icon is None:
+        return
+    active = is_active()
+    tray_icon.icon = make_icon(active)
+    tray_icon.title = "AutoClick: ON" if active else "AutoClick: OFF"
 
 
-def toggle(icon, item):
-    global running, worker_thread
-    running = not running
-    icon.icon = make_icon(running)
-    icon.title = "AutoClick: ON" if running else "AutoClick: OFF"
-    if running:
-        worker_thread = threading.Thread(target=auto_click_loop, daemon=True)
-        worker_thread.start()
+def auto_click_loop(stop):
+    global current_stop
+    try:
+        clicker.run(lambda: not stop.is_set() and not shutdown.is_set(), log)
+    except Exception as e:
+        log(f"[エラー] {type(e).__name__}: {e}")
+    finally:
+        # 緊急停止やエラーで自分から止まった場合は OFF 表示に戻す。
+        # すでに新しいワーカーに置き換わっていたら何もしない。
+        with state_lock:
+            changed = current_stop is stop
+            if changed:
+                current_stop = None
+        if changed:
+            update_tray_icon()
+            log("AutoClick 停止")
+
+
+def set_active(active):
+    global current_stop
+    with state_lock:
+        if active == (current_stop is not None):
+            return
+        if active:
+            stop = threading.Event()
+            current_stop = stop
+        else:
+            current_stop.set()
+            current_stop = None
+    update_tray_icon()
+    if active:
         log("AutoClick 開始")
+        threading.Thread(target=auto_click_loop, args=(stop,), daemon=True).start()
     else:
         log("AutoClick 停止")
+
+
+def toggle(icon=None, item=None):
+    set_active(not is_active())
 
 
 def reload_settings(icon, item):
     open_settings_window(icon, item)
 
 
-tray_icon = None
-
-def on_esc(e):
-    global running, tray_icon
-    if running and tray_icon is not None:
-        toggle(tray_icon, None)
-
-keyboard.on_press_key('esc', on_esc)
+def register_hotkeys():
+    try:
+        keyboard.on_press_key(STOP_HOTKEY, lambda e: set_active(False))
+        if TOGGLE_HOTKEY:
+            keyboard.add_hotkey(TOGGLE_HOTKEY, toggle)
+        keys = f"{TOGGLE_HOTKEY.upper()}: ON/OFF, " if TOGGLE_HOTKEY else ""
+        log(f"ホットキー {keys}{STOP_HOTKEY.upper()}: 停止")
+    except Exception as e:
+        log(f"[警告] ホットキーを登録できませんでした: {e}")
 
 
 def on_quit(icon, item):
-    global running
-    running = False
+    shutdown.set()
+    set_active(False)
     log("終了しました")
+    run_on_ui(None)
     icon.stop()
 
 
 def main():
     global tray_icon
+    threading.Thread(target=ui_main, daemon=True).start()
+    register_hotkeys()
     clicker.reload_config(log)
     icon = pystray.Icon(
         name="AutoClick",
@@ -766,4 +926,10 @@ if __name__ == "__main__":
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         ctypes.windll.user32.MessageBoxW(0, "AutoClick はすでに起動しています。", "多重起動禁止", 0x10)
         sys.exit(0)
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        shutdown.set()
+    except Exception:
+        show_error("予期しないエラーで終了しました:\n\n" + traceback.format_exc())
+        sys.exit(1)
