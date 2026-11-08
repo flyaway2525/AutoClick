@@ -374,6 +374,8 @@ start_test_button.bat
 
 Python が入っていない PC でも動く exe 版を作れます。
 
+**配り方（GitHub Releases・クラウドストレージ）、配る前の動作確認、受け取った人の手順、更新の仕方は [DISTRIBUTION.md](DISTRIBUTION.md) にまとめています。**
+
 ```bat
 build_exe.bat
 ```
