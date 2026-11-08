@@ -64,7 +64,8 @@ DEFAULT_CONFIG = {
     "snowman_stove_radius": 150,
     # ===== 順番クリック（クッキング・雪だるま）共通 =====
     # 通常モードの threshold / rearm_delay とは別。設定画面で通常モードを調整しても影響しない
-    "sequence_threshold": 0.75,
+    # 実際のゲームではアイコンが出てくる途中などで 0.70〜0.75 になることがあるので 0.70
+    "sequence_threshold": 0.70,
     # ボタンが消えてからこの秒数たったら「新しく出た」とみなす
     "sequence_rearm_delay": 0.3,
     # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数
@@ -882,7 +883,16 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                         log(f"{place}#{st.id} が見えなくなりました")
                     stoves.remove(st)
 
-                if finishing and not any(in_progress(st) for st in stoves):
+                # 終了待ち: 作りかけが無くなったら止める。ただし「最初の手順を押しただけで、
+                # その後そこにボタンが出ていない台」は、別の台として見えている（位置がずれた）ことが
+                # 多いので待たない（以前は台を忘れるまで最大 30 秒待っていた）
+                def keeps_running(st):
+                    if not in_progress(st):
+                        return False
+                    stale = now - st.last_seen >= cfg["sequence_resync_delay"] * 3
+                    return not (st.step == first and stale)
+
+                if finishing and not any(keeps_running(st) for st in stoves):
                     log(f"作りかけの{work}がないので止めます")
                     break
 

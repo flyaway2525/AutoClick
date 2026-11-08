@@ -45,6 +45,6 @@
   "sequence_retry_delay": 1.0,
   "sequence_lost_timeout": 30.0,
   "sequence_interval": 0.05,
-  "sequence_threshold": 0.75,
+  "sequence_threshold": 0.7,
   "sequence_rearm_delay": 0.3
 }

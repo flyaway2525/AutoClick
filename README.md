@@ -288,7 +288,7 @@ start.bat
 ],
 "cooking_stove_radius": 60,
 
-"sequence_threshold": 0.75,
+"sequence_threshold": 0.70,
 "sequence_rearm_delay": 0.3,
 "sequence_retry_delay": 1.0,
 "sequence_lost_timeout": 30.0,
