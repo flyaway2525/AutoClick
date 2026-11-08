@@ -73,6 +73,11 @@ DEFAULT_CONFIG = {
     "sequence_lost_timeout": 30.0,
     # 1回の画面チェックごとの待機秒数
     "sequence_interval": 0.05,
+    # コンロに「今」でも「次」でもない手順のボタンがこの秒数出ていたら、その手順に合わせ直す
+    # （状態がずれて、ボタンが見えているのに何も押さなくなるのを防ぐ）
+    "sequence_resync_delay": 2.0,
+    # どのボタンもこの秒数見えなければ、画面に「ボタンが見つかりません」と出す
+    "sequence_idle_warn": 10.0,
 }
 
 # 古い設定名（cooking_*）も読めるようにする
@@ -218,6 +223,8 @@ def _normalize_config(raw, log):
     merged["sequence_retry_delay"] = max(0.0, float(merged["sequence_retry_delay"]))
     merged["sequence_lost_timeout"] = max(1.0, float(merged["sequence_lost_timeout"]))
     merged["sequence_interval"] = max(0.0, float(merged["sequence_interval"]))
+    merged["sequence_resync_delay"] = max(0.2, float(merged["sequence_resync_delay"]))
+    merged["sequence_idle_warn"] = max(1.0, float(merged["sequence_idle_warn"]))
     return merged
 
 
@@ -596,7 +603,9 @@ class _Stove:
     press: _Press = field(default_factory=_Press)
     shared_done: bool = False  # 待っている共通ボタン（クッキング開始など）を押した
     done: bool = False         # 最後の手順を押し終えた
-    last_seen: float = 0.0     # 今か次の手順のボタンを最後に見た時刻
+    last_seen: float = 0.0     # このコンロのボタンを最後に見た時刻
+    other_step: int | None = None  # 「今」でも「次」でもない手順のボタンが出ている
+    other_since: float = 0.0
 
 
 @dataclass
@@ -647,7 +656,7 @@ def _sequence_signature(cfg, name):
     ], sort_keys=True)
 
 
-def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
+def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", notify=None):
     """<name>_steps を上から順にクリックする。コンロが複数あっても、コンロごとに順番を守る。
 
     - コンロの上に出るボタンは、出た位置でコンロを見分けて、コンロごとに
@@ -655,6 +664,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
     - shared の手順（クッキング開始など）は、それを待っているコンロがあれば押す。
     - should_finish() が True になったら新しい料理は始めず、作りかけの料理を
       最後の手順まで終えてから戻る。
+    - notify(text) で画面に知らせたいこと（ボタンが見つからない等）を渡す。None で消す。
     """
     names = SEQUENCES[name]
     title, place, work = names["title"], names["place"], names["work"]
@@ -663,7 +673,15 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
     active_sig = None
     steps = None
     finish_logged = False
-    log(f"{title} 開始")
+    idle_warned = 0  # 「見つかりません」を出した秒数（0 = 出していない）
+
+    def tell(text):
+        if notify is not None:
+            try:
+                notify(text)
+            except Exception:
+                pass
+
     with ScreenCapture() as screen:
         while is_running():
             try:
@@ -727,6 +745,20 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                 dets = {i: dedupe(find_matches(gray, st.tpl, st.threshold, small_cache, scale_range))
                         for i, st in enumerate(steps)}
                 hits = [(d[0], i, d) for i, ds in dets.items() for d in ds]
+                if last_hit == 0.0:
+                    last_hit = now  # 開始直後から数える
+                if hits and idle_warned:
+                    idle_warned = 0
+                    tell(None)
+                    log("ボタンが見つかりました")
+                elif not hits:
+                    idle = now - last_hit
+                    warn_at = cfg["sequence_idle_warn"]
+                    if idle >= warn_at and int(idle // warn_at) * warn_at > idle_warned:
+                        if not idle_warned:
+                            log(f"ボタンが {int(idle)} 秒見つかりません")
+                        idle_warned = int(idle // warn_at) * warn_at
+                        tell(f"ボタンが {int(idle)} 秒見つかりません（画面にボタンが出ているか確認してください）")
                 if hits:
                     last_hit = now
                     if ui_scale is None:
@@ -744,8 +776,10 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                         _, cx, cy, _, _ = det
                         near = [(abs(cx - st.x) + abs(cy - st.y), st.id, st) for st in stoves
                                 if abs(cx - st.x) <= radius and abs(cy - st.y) <= radius]
+                        # 近くに複数あれば、この手順を「今」か「次」として待っているコンロを優先
+                        accepting = [n for n in near if i in (n[2].step, next_local(n[2].step))]
                         if near:
-                            st = min(near)[2]
+                            st = min(accepting or near)[2]
                         else:
                             if finishing and i == first:
                                 continue  # 終了待ち中は新しい料理を始めない
@@ -762,6 +796,25 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                 for st in stoves:
                     found = seen.get(st.id, {})
                     nxt = next_local(st.step)
+                    others = [i for i in found if i not in (st.step, nxt)]
+                    if others and st.step not in found and nxt not in found:
+                        # 「今」でも「次」でもない手順のボタンだけが出ている（状態がずれた）
+                        st.last_seen = now
+                        k = others[0]
+                        if st.other_step != k:
+                            st.other_step, st.other_since = k, now
+                        elif now - st.other_since >= cfg["sequence_resync_delay"]:
+                            st.other_step = None
+                            if finishing and k == first:
+                                if in_progress(st):
+                                    log(f"{place}#{st.id} {work}完了とみなします（次の{work}は始めません）")
+                                st.done = True
+                            else:
+                                log(f"{place}#{st.id} 手順{k + 1} ({steps[k].label}) に合わせ直しました")
+                                st.step, st.press, st.shared_done, st.done = k, _Press(), False, False
+                                nxt = next_local(st.step)
+                    else:
+                        st.other_step = None
                     if nxt != st.step and nxt in found and not (finishing and nxt == first):
                         if st.step == last and not st.done:
                             log(f"{place}#{st.id} {work}完了")

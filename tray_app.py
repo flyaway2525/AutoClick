@@ -50,7 +50,7 @@ except ImportError as exc:
 TOGGLE_HOTKEY = "f7"   # 通常の AutoClick ON/OFF（None で無効）
 SNOWMAN_HOTKEY = "f8"  # 雪だるま自動（None で無効）
 COOKING_HOTKEY = "f9"  # クッキング自動（None で無効）
-STOP_HOTKEY = "esc"   # 動作中のみ停止
+STOP_HOTKEY = "f10"   # すぐ停止（ESC はゲームでよく使うので、押すたびに止まらないよう別のキーにしている）
 
 OVERLAY_ENABLED = True          # 画面の隅に状態を表示する（ゲーム中でも見える）
 OVERLAY_POSITION = "top-left"   # top-left / top-right / bottom-left / bottom-right
@@ -986,6 +986,18 @@ def show_notice(text, sub):
                                      lambda: show_overlay(active_mode(), is_finishing()))
 
 
+overlay_hint = None  # 動作中に出すお知らせ（ボタンが見つからない等）
+
+
+def set_hint(text):
+    """UI スレッドで呼ぶ。動作中の表示にお知らせを足す（None で消す）。"""
+    global overlay_hint
+    overlay_hint = text
+    mode = active_mode()
+    if mode is not None:
+        show_overlay(mode, is_finishing())
+
+
 def show_overlay(mode, finishing):
     """UI スレッドで呼ぶ。mode=None は OFF（少し表示して消す）。"""
     if mode is None:
@@ -994,13 +1006,16 @@ def show_overlay(mode, finishing):
         info = SEQ_MODES[mode]
         color = "#e6d228"
         text = f"{MODE_LABELS[mode]}  {info['work']}を終えたら停止"
-        sub = f"{_hk(info['hotkey'])}: すぐ停止 / ESC: すぐ停止"
+        sub = f"{_hk(info['hotkey'])}: すぐ停止 / {_hk(STOP_HOTKEY)}: すぐ停止"
     elif mode in SEQ_MODES:
         info = SEQ_MODES[mode]
         color, text = info["color"], f"{MODE_LABELS[mode]}  ON"
-        sub = f"{_hk(info['hotkey'])}: {info['work']}を終えたら停止 / ESC: すぐ停止"
+        sub = f"{_hk(info['hotkey'])}: {info['work']}を終えたら停止 / {_hk(STOP_HOTKEY)}: すぐ停止"
     else:
-        color, text, sub = "#32c832", f"{MODE_LABELS[mode]}  ON", f"{_hk(TOGGLE_HOTKEY)}: 停止 / ESC: すぐ停止"
+        color, text, sub = "#32c832", f"{MODE_LABELS[mode]}  ON", f"{_hk(TOGGLE_HOTKEY)}: 停止 / {_hk(STOP_HOTKEY)}: すぐ停止"
+    if mode is not None and overlay_hint:
+        color = "#e6d228"
+        sub = f"⚠ {overlay_hint}\n{sub}"
     _draw_overlay(color, text, sub, hide_after=OVERLAY_OFF_SECONDS if mode is None else None)
 
 
@@ -1175,7 +1190,8 @@ def auto_click_loop(stop, mode, finish):
     running = lambda: not stop.is_set() and not shutdown.is_set()
     try:
         if mode in SEQ_MODES:
-            clicker.run_sequence(running, log, should_finish=finish.is_set, name=mode)
+            clicker.run_sequence(running, log, should_finish=finish.is_set, name=mode,
+                                 notify=lambda text: run_on_ui(set_hint, text) if not stop.is_set() else None)
         else:
             clicker.run(running, log)
     except Exception as e:
@@ -1194,9 +1210,11 @@ def auto_click_loop(stop, mode, finish):
             log(f"{MODE_LABELS[mode]} 停止")
 
 
-def set_active(active, mode="normal"):
-    """active=True で mode を開始、False で停止（どちらもすぐ）。キー操作は press_mode を通す。"""
-    global current_stop, current_mode, current_finish
+def set_active(active, mode="normal", reason=None):
+    """active=True で mode を開始、False で停止（どちらもすぐ）。キー操作は press_mode を通す。
+    reason は止めた理由（ログ用。「F10 キー」「メニュー」など）。"""
+    global current_stop, current_mode, current_finish, overlay_hint
+    overlay_hint = None
     with state_lock:
         old_mode = current_mode
         if active and old_mode == mode:
@@ -1212,7 +1230,7 @@ def set_active(active, mode="normal"):
             current_stop, current_mode, current_finish = None, None, None
     update_tray_icon()
     if old_mode is not None:
-        log(f"{MODE_LABELS[old_mode]} 停止")
+        log(f"{MODE_LABELS[old_mode]} 停止" + (f"（{reason}）" if reason else ""))
     if active:
         log(f"{MODE_LABELS[mode]} 開始")
         threading.Thread(target=auto_click_loop, args=(stop, mode, finish), daemon=True).start()
@@ -1220,11 +1238,11 @@ def set_active(active, mode="normal"):
 
 def _stop_hint(mode):
     if mode in SEQ_MODES:
-        return f"{_hk(SEQ_MODES[mode]['hotkey'])} か ESC で止めてください"
-    return f"{_hk(TOGGLE_HOTKEY)} か ESC で止めてください"
+        return f"{_hk(SEQ_MODES[mode]['hotkey'])} か {_hk(STOP_HOTKEY)} で止めてください"
+    return f"{_hk(TOGGLE_HOTKEY)} か {_hk(STOP_HOTKEY)} で止めてください"
 
 
-def press_mode(mode):
+def press_mode(mode, source=None):
     """モードのキー（メニュー）を押した時の動き。どのモードも同じルール:
     - 何も動いていない → 開始
     - 別のモードが動作中 → 何もしない（同時には動かさない。画面に理由を出す）
@@ -1253,11 +1271,16 @@ def press_mode(mode):
         log(f"{MODE_LABELS[mode]}: 作りかけの{work}を終えたら止めます（もう一度押すとすぐ止めます）")
         update_tray_icon()
     else:
-        set_active(False)
+        set_active(False, reason=source)
+
+
+def _source(icon, key):
+    """メニューから呼ばれたか、キーで呼ばれたか（ログ用）。"""
+    return "メニュー" if icon is not None else f"{_hk(key)} キー"
 
 
 def stop_all(icon=None, item=None):
-    set_active(False)
+    set_active(False, reason=_source(icon, STOP_HOTKEY))
 
 
 _last_tray_click = [0.0]
@@ -1271,25 +1294,25 @@ def tray_default_action(icon=None, item=None):
         return
     _last_tray_click[0] = now
     if is_active():
-        set_active(False)
+        set_active(False, reason="トレイアイコンのクリック")
     else:
         set_active(True, "normal")
 
 
 def toggle(icon=None, item=None):
-    press_mode("normal")
+    press_mode("normal", _source(icon, TOGGLE_HOTKEY))
 
 
-def toggle_sequence(name):
-    press_mode(name)
+def toggle_sequence(name, icon=None):
+    press_mode(name, _source(icon, SEQ_MODES[name]["hotkey"]))
 
 
 def toggle_cooking(icon=None, item=None):
-    toggle_sequence("cooking")
+    toggle_sequence("cooking", icon)
 
 
 def toggle_snowman(icon=None, item=None):
-    toggle_sequence("snowman")
+    toggle_sequence("snowman", icon)
 
 
 def reload_settings(icon, item):
@@ -1340,7 +1363,7 @@ def register_hotkeys():
 
 def on_quit(icon, item):
     shutdown.set()
-    set_active(False)
+    set_active(False, reason="アプリ終了")
     log("終了しました")
     run_on_ui(None)
     icon.stop()
