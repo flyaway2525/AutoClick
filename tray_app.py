@@ -59,6 +59,7 @@ OVERLAY_ALPHA = 0.85            # 不透明度（0〜1）
 OVERLAY_OFF_SECONDS = 2.0       # 停止した時、この秒数だけ「停止」を表示して消す
 HELP_HOTKEY = "f1"              # キー設定を画面に表示（None で無効）
 HELP_SECONDS = 6.0              # キー設定を表示しておく秒数（もう一度押すと消える）
+NOTICE_SECONDS = 2.5            # 「〇〇が動作中です」などのお知らせを出しておく秒数
 
 # ===== UI スレッド =====
 # tkinter は1つのスレッドからしか触れないため、ログ・設定ウィンドウは
@@ -117,8 +118,8 @@ def log(msg: str):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line, flush=True)
-    _write_log_file(f"[{time.strftime('%Y-%m-%d')} {ts}] {msg}")
     with log_lock:
+        _write_log_file(f"[{time.strftime('%Y-%m-%d')} {ts}] {msg}")
         log_buffer.append(line)
         if len(log_buffer) > 500:
             log_buffer.pop(0)
@@ -253,8 +254,13 @@ def open_settings_window(icon=None, item=None):
             widget.bind("<Leave>", hide_tip)
 
         def normalize_template_path(path: str):
-            p = os.path.abspath(os.path.normpath(str(path).strip()))
-            return p if p else ""
+            raw = str(path).strip()
+            if not raw:
+                return ""
+            # 相対パスは作業フォルダではなくアプリのフォルダ基準（ショートカットから起動しても同じ）
+            if not os.path.isabs(raw):
+                raw = os.path.join(project_root, raw)
+            return os.path.normpath(raw)
 
         def resolve_template_entry(entry: str, candidate_paths):
             raw = str(entry).strip()
@@ -607,7 +613,9 @@ def open_settings_window(icon=None, item=None):
 
             return get_value, set_value
 
-        numeric_frame = tk.LabelFrame(frame, text="数値設定", padx=8, pady=8)
+        numeric_frame = tk.LabelFrame(
+            frame, text="数値設定（通常の AutoClick 用。倍率・最小画像サイズ・検索縮小率はクッキング／雪だるまにも使われます）",
+            padx=8, pady=8)
         numeric_frame.pack(fill=tk.X, pady=(0, 12))
 
         get_threshold, set_threshold = add_numeric_control(
@@ -795,6 +803,9 @@ def open_settings_window(icon=None, item=None):
             if not payload["templates"]:
                 messagebox.showerror("入力エラー", "クリック対象画像を1件以上追加してください。", parent=root)
                 return
+            if payload["scale_min"] > payload["scale_max"]:
+                messagebox.showerror("入力エラー", "最小倍率が最大倍率より大きくなっています。", parent=root)
+                return
 
             # 設定UIに無い項目（cooking_steps など）は消さずに残す
             try:
@@ -918,6 +929,13 @@ def _set_click_through(win):
     style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                           style | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE)
+    # 画面の撮影（ボタン探し）に写らないようにする。表示の下にボタンがあっても見つけられる
+    # （Windows 10 2004 以降。古い Windows では何もしない）
+    WDA_EXCLUDEFROMCAPTURE = 0x11
+    try:
+        user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+    except Exception:
+        pass
 
 
 def _create_overlay():
@@ -960,8 +978,33 @@ def _overlay_hide():
         overlay_window.withdraw()
 
 
+def show_notice(text, sub):
+    """UI スレッドで呼ぶ。少しの間だけメッセージを出し、そのあと今の状態の表示に戻す。"""
+    _draw_overlay("#e6d228", text, sub, hide_after=None)
+    global overlay_hide_job
+    overlay_hide_job = ui_root.after(int(NOTICE_SECONDS * 1000),
+                                     lambda: show_overlay(active_mode(), is_finishing()))
+
+
 def show_overlay(mode, finishing):
     """UI スレッドで呼ぶ。mode=None は OFF（少し表示して消す）。"""
+    if mode is None:
+        color, text, sub = "#d23c3c", "AutoClick 停止", ""
+    elif finishing:
+        info = SEQ_MODES[mode]
+        color = "#e6d228"
+        text = f"{MODE_LABELS[mode]}  {info['work']}を終えたら停止"
+        sub = f"{_hk(info['hotkey'])}: すぐ停止 / ESC: すぐ停止"
+    elif mode in SEQ_MODES:
+        info = SEQ_MODES[mode]
+        color, text = info["color"], f"{MODE_LABELS[mode]}  ON"
+        sub = f"{_hk(info['hotkey'])}: {info['work']}を終えたら停止 / ESC: すぐ停止"
+    else:
+        color, text, sub = "#32c832", f"{MODE_LABELS[mode]}  ON", f"{_hk(TOGGLE_HOTKEY)}: 停止 / ESC: すぐ停止"
+    _draw_overlay(color, text, sub, hide_after=OVERLAY_OFF_SECONDS if mode is None else None)
+
+
+def _draw_overlay(color, text, sub, hide_after):
     global overlay_hide_job, overlay_keep_job
     if not OVERLAY_ENABLED:
         return
@@ -970,20 +1013,6 @@ def show_overlay(mode, finishing):
     if overlay_hide_job is not None:
         ui_root.after_cancel(overlay_hide_job)
         overlay_hide_job = None
-
-    if mode is None:
-        color, text, sub = "#d23c3c", "AutoClick 停止", ""
-    elif finishing:
-        info = SEQ_MODES[mode]
-        color = "#e6d228"
-        text = f"{MODE_LABELS[mode]}  {info['work']}を終えたら停止"
-        sub = f"{_hk(info['hotkey'])}: すぐ止める / ESC: 停止"
-    elif mode in SEQ_MODES:
-        info = SEQ_MODES[mode]
-        color, text = info["color"], f"{MODE_LABELS[mode]}  ON"
-        sub = f"{_hk(info['hotkey'])}: {info['work']}を終えたら停止 / ESC: すぐ停止"
-    else:
-        color, text, sub = "#32c832", f"{MODE_LABELS[mode]}  ON", f"{_hk(TOGGLE_HOTKEY)}: 停止 / ESC: 停止"
 
     c = overlay_canvas
     c.delete("all")
@@ -1018,8 +1047,8 @@ def show_overlay(mode, finishing):
     overlay_window.lift()
     if overlay_keep_job is None:
         overlay_keep_job = ui_root.after(1000, _overlay_keep_on_top)
-    if mode is None:
-        overlay_hide_job = ui_root.after(int(OVERLAY_OFF_SECONDS * 1000), _overlay_hide)
+    if hide_after is not None:
+        overlay_hide_job = ui_root.after(int(hide_after * 1000), _overlay_hide)
 
 
 # ===== キー設定の表示（F1） =====
@@ -1166,7 +1195,7 @@ def auto_click_loop(stop, mode, finish):
 
 
 def set_active(active, mode="normal"):
-    """active=True で mode を開始（別モードが動いていたら止めて切り替え）。"""
+    """active=True で mode を開始、False で停止（どちらもすぐ）。キー操作は press_mode を通す。"""
     global current_stop, current_mode, current_finish
     with state_lock:
         old_mode = current_mode
@@ -1189,37 +1218,70 @@ def set_active(active, mode="normal"):
         threading.Thread(target=auto_click_loop, args=(stop, mode, finish), daemon=True).start()
 
 
-def _busy_with_other(mode):
-    """別のモードが動作中なら True（同時には動かさない）。"""
-    other = active_mode()
-    if other is not None and other != mode:
-        log(f"{MODE_LABELS[other]} が動作中なので {MODE_LABELS[mode]} は開始しません（先に止めてください）")
-        return True
-    return False
+def _stop_hint(mode):
+    if mode in SEQ_MODES:
+        return f"{_hk(SEQ_MODES[mode]['hotkey'])} か ESC で止めてください"
+    return f"{_hk(TOGGLE_HOTKEY)} か ESC で止めてください"
+
+
+def press_mode(mode):
+    """モードのキー（メニュー）を押した時の動き。どのモードも同じルール:
+    - 何も動いていない → 開始
+    - 別のモードが動作中 → 何もしない（同時には動かさない。画面に理由を出す）
+    - 通常モード動作中 → 停止
+    - 順番クリック動作中 → 作りかけを終えたら停止 / 終了待ち中 → すぐ停止
+    """
+    with state_lock:
+        running = current_mode
+        finish = current_finish
+        if running is not None and running != mode:
+            action = "busy"
+        elif running is None:
+            action = "start"
+        elif mode in SEQ_MODES and not finish.is_set():
+            finish.set()
+            action = "finish"
+        else:
+            action = "stop"
+    if action == "busy":
+        log(f"{MODE_LABELS[running]} が動作中なので {MODE_LABELS[mode]} は開始しません（{_stop_hint(running)}）")
+        run_on_ui(show_notice, f"{MODE_LABELS[running]} が動作中です", _stop_hint(running))
+    elif action == "start":
+        set_active(True, mode)
+    elif action == "finish":
+        work = SEQ_MODES[mode]["work"]
+        log(f"{MODE_LABELS[mode]}: 作りかけの{work}を終えたら止めます（もう一度押すとすぐ止めます）")
+        update_tray_icon()
+    else:
+        set_active(False)
+
+
+def stop_all(icon=None, item=None):
+    set_active(False)
+
+
+_last_tray_click = [0.0]
+
+
+def tray_default_action(icon=None, item=None):
+    """トレイアイコンのクリック: 動いていれば止める、止まっていれば通常モードを開始。
+    pystray はクリックごとに呼ぶので、ダブルクリックの2回目は無視する（開始してすぐ止まらないように）。"""
+    now = time.monotonic()
+    if now - _last_tray_click[0] < 0.6:
+        return
+    _last_tray_click[0] = now
+    if is_active():
+        set_active(False)
+    else:
+        set_active(True, "normal")
 
 
 def toggle(icon=None, item=None):
-    if _busy_with_other("normal"):
-        return
-    set_active(active_mode() != "normal", "normal")
+    press_mode("normal")
 
 
 def toggle_sequence(name):
-    """OFF → 開始 / 動作中 → 作りかけを終えたら止める / 終了待ち中 → すぐ止める"""
-    if _busy_with_other(name):
-        return
-    with state_lock:
-        running = current_mode == name
-        finish = current_finish
-        request_finish = running and not finish.is_set()
-        if request_finish:
-            finish.set()
-    if request_finish:
-        work = SEQ_MODES[name]["work"]
-        log(f"{MODE_LABELS[name]}: 作りかけの{work}を終えたら止めます（もう一度押すとすぐ止めます）")
-        update_tray_icon()
-    else:
-        set_active(not running, name)
+    press_mode(name)
 
 
 def toggle_cooking(icon=None, item=None):
@@ -1234,17 +1296,39 @@ def reload_settings(icon, item):
     open_settings_window(icon, item)
 
 
+KEY_REPEAT_GAP = 0.6  # この秒数以内に続けて来た「押した」は、押しっぱなしのキーリピートとみなす
+
+
+def _bind_key(key, func):
+    """キーを押した瞬間に1回だけ func を呼ぶ。押しっぱなしのキーリピートでは呼ばない。
+    （F8/F9 は 開始 → 終了待ち → 停止 と押すたびに変わるので、リピートで一気に止まってしまう）"""
+    state = {"held": False, "last": 0.0}
+
+    def on_down(_e):
+        now = time.monotonic()
+        repeat = state["held"] and now - state["last"] < KEY_REPEAT_GAP
+        state["held"], state["last"] = True, now
+        if not repeat:
+            func()
+
+    def on_up(_e):
+        state["held"] = False
+
+    keyboard.on_press_key(key, on_down)
+    keyboard.on_release_key(key, on_up)
+
+
 def register_hotkeys():
     try:
-        keyboard.on_press_key(STOP_HOTKEY, lambda e: set_active(False))
+        _bind_key(STOP_HOTKEY, stop_all)
         if TOGGLE_HOTKEY:
-            keyboard.add_hotkey(TOGGLE_HOTKEY, toggle)
+            _bind_key(TOGGLE_HOTKEY, toggle)
         if COOKING_HOTKEY:
-            keyboard.add_hotkey(COOKING_HOTKEY, toggle_cooking)
+            _bind_key(COOKING_HOTKEY, toggle_cooking)
         if SNOWMAN_HOTKEY:
-            keyboard.add_hotkey(SNOWMAN_HOTKEY, toggle_snowman)
+            _bind_key(SNOWMAN_HOTKEY, toggle_snowman)
         if HELP_HOTKEY:
-            keyboard.add_hotkey(HELP_HOTKEY, toggle_help)
+            _bind_key(HELP_HOTKEY, toggle_help)
         keys = f"{TOGGLE_HOTKEY.upper()}: ON/OFF, " if TOGGLE_HOTKEY else ""
         keys += f"{SNOWMAN_HOTKEY.upper()}: 雪だるま自動, " if SNOWMAN_HOTKEY else ""
         keys += f"{COOKING_HOTKEY.upper()}: クッキング自動, " if COOKING_HOTKEY else ""
@@ -1262,6 +1346,23 @@ def on_quit(icon, item):
     icon.stop()
 
 
+def _menu_label(mode):
+    """メニューの文言を、押した時に起きることにそろえる。"""
+    key = SEQ_MODES[mode]["hotkey"] if mode in SEQ_MODES else TOGGLE_HOTKEY
+    hint = f"  ({key.upper()})" if key else ""
+    running = active_mode()
+    label = MODE_LABELS[mode] if mode in SEQ_MODES else "通常の AutoClick"
+    if running is None:
+        return f"{label}: 開始{hint}"
+    if running != mode:
+        return f"{label}（{MODE_LABELS[running]} が動作中）"
+    if mode in SEQ_MODES:
+        if is_finishing():
+            return f"{label}: すぐ停止{hint}"
+        return f"{label}: {SEQ_MODES[mode]['work']}を終えたら停止{hint}"
+    return f"{label}: 停止{hint}"
+
+
 def main():
     global tray_icon
     threading.Thread(target=ui_main, daemon=True).start()
@@ -1272,18 +1373,16 @@ def main():
         icon=make_icon(False),
         title="AutoClick: OFF",
         menu=pystray.Menu(
-            pystray.MenuItem("ON / OFF", toggle, default=True,
+            pystray.MenuItem(lambda item: "止める" if is_active() else "通常の AutoClick を開始",
+                             tray_default_action, default=True, visible=False),
+            pystray.MenuItem(lambda item: _menu_label("normal"), toggle,
                              checked=lambda item: active_mode() == "normal"),
-            pystray.MenuItem(
-                lambda item: "クッキング自動 すぐ止める"
-                if is_finishing() and active_mode() == "cooking" else "クッキング自動 ON / OFF",
-                toggle_cooking,
-                checked=lambda item: active_mode() == "cooking"),
-            pystray.MenuItem(
-                lambda item: "雪だるま自動 すぐ止める"
-                if is_finishing() and active_mode() == "snowman" else "雪だるま自動 ON / OFF",
-                toggle_snowman,
-                checked=lambda item: active_mode() == "snowman"),
+            pystray.MenuItem(lambda item: _menu_label("snowman"), toggle_snowman,
+                             checked=lambda item: active_mode() == "snowman"),
+            pystray.MenuItem(lambda item: _menu_label("cooking"), toggle_cooking,
+                             checked=lambda item: active_mode() == "cooking"),
+            pystray.MenuItem("すぐ停止", stop_all, enabled=lambda item: is_active()),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("設定", reload_settings),
             pystray.MenuItem("キー設定を表示", toggle_help),
             pystray.MenuItem("ログを開く", open_log_window),
@@ -1296,8 +1395,9 @@ def main():
 
 
 if __name__ == "__main__":
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "AutoClickTrayApp_Mutex")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    mutex = kernel32.CreateMutexW(None, False, "AutoClickTrayApp_Mutex")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         ctypes.windll.user32.MessageBoxW(0, "AutoClick はすでに起動しています。", "多重起動禁止", 0x10)
         sys.exit(0)
     try:

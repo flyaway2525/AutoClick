@@ -26,9 +26,6 @@
     "images/flai_spatula.png",
     "images/cook_4_mitten.png"
   ],
-  "cooking_retry_delay": 1.0,
-  "cooking_lost_timeout": 30.0,
-  "cooking_interval": 0.05,
   "cooking_stove_radius": 60,
   "snowman_steps": [
     "images/snow_1_place.png",
@@ -44,5 +41,10 @@
     },
     "images/snow_4_collect.png"
   ],
-  "snowman_stove_radius": 150
+  "snowman_stove_radius": 150,
+  "sequence_retry_delay": 1.0,
+  "sequence_lost_timeout": 30.0,
+  "sequence_interval": 0.05,
+  "sequence_threshold": 0.75,
+  "sequence_rearm_delay": 0.3
 }

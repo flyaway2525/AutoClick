@@ -51,13 +51,9 @@ DEFAULT_CONFIG = {
         "images/flai_spatula.png",
         "images/cook_4_mitten.png",
     ],
-    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数
-    "cooking_retry_delay": 1.0,
-    # コンロのボタンがこの秒数まったく見えなければ、そのコンロを忘れる
-    "cooking_lost_timeout": 30.0,
     # アイコンの中心がこの距離（px）以内なら同じコンロとみなす
     "cooking_stove_radius": 60,
-    # ===== 雪だるま自動 =====（手順の書き方は cooking_steps と同じ。時間の設定は cooking_* を共用）
+    # ===== 雪だるま自動 =====（手順の書き方は cooking_steps と同じ）
     "snowman_steps": [
         "images/snow_1_place.png",
         {"template": "images/snow_2_operate.png", "repeat": True},
@@ -66,8 +62,24 @@ DEFAULT_CONFIG = {
     ],
     # 雪玉が大きくなるとアイコンの位置が上にずれるので広めにする
     "snowman_stove_radius": 150,
+    # ===== 順番クリック（クッキング・雪だるま）共通 =====
+    # 通常モードの threshold / rearm_delay とは別。設定画面で通常モードを調整しても影響しない
+    "sequence_threshold": 0.75,
+    # ボタンが消えてからこの秒数たったら「新しく出た」とみなす
+    "sequence_rearm_delay": 0.3,
+    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数
+    "sequence_retry_delay": 1.0,
+    # コンロ（雪台）のボタンがこの秒数まったく見えなければ、そのコンロを忘れる
+    "sequence_lost_timeout": 30.0,
     # 1回の画面チェックごとの待機秒数
-    "cooking_interval": 0.05,
+    "sequence_interval": 0.05,
+}
+
+# 古い設定名（cooking_*）も読めるようにする
+_LEGACY_KEYS = {
+    "sequence_retry_delay": "cooking_retry_delay",
+    "sequence_lost_timeout": "cooking_lost_timeout",
+    "sequence_interval": "cooking_interval",
 }
 
 CLICK_MODES = ("repeat", "once")
@@ -197,9 +209,15 @@ def _normalize_config(raw, log):
         merged[f"{name}_steps"] = _normalize_steps(merged, name, image_dir, candidate_templates, log)
         key = f"{name}_stove_radius"
         merged[key] = max(1.0, float(merged.get(key, DEFAULT_CONFIG[key])))
-    merged["cooking_retry_delay"] = max(0.0, float(merged.get("cooking_retry_delay", DEFAULT_CONFIG["cooking_retry_delay"])))
-    merged["cooking_lost_timeout"] = max(1.0, float(merged.get("cooking_lost_timeout", DEFAULT_CONFIG["cooking_lost_timeout"])))
-    merged["cooking_interval"] = max(0.0, float(merged.get("cooking_interval", DEFAULT_CONFIG["cooking_interval"])))
+    raw = raw or {}
+    for new, old in _LEGACY_KEYS.items():
+        if new not in raw and old in raw:
+            merged[new] = raw[old]
+    merged["sequence_threshold"] = max(0.0, min(1.0, float(merged["sequence_threshold"])))
+    merged["sequence_rearm_delay"] = max(0.0, float(merged["sequence_rearm_delay"]))
+    merged["sequence_retry_delay"] = max(0.0, float(merged["sequence_retry_delay"]))
+    merged["sequence_lost_timeout"] = max(1.0, float(merged["sequence_lost_timeout"]))
+    merged["sequence_interval"] = max(0.0, float(merged["sequence_interval"]))
     return merged
 
 
@@ -491,7 +509,8 @@ def run(is_running, log):
                         downscale=runtime_config["search_downscale"],
                     )
                     if loaded_templates is None:
-                        log("[エラー] テンプレート読み込み失敗。設定を見直してください")
+                        log("[エラー] 画像を読み込めないので止めます。設定と images フォルダを確認してください")
+                        break
                     else:
                         threshold = runtime_config["threshold"]
                         click_interval = runtime_config["click_interval"]
@@ -500,10 +519,6 @@ def run(is_running, log):
                         rearm_delay = runtime_config["rearm_delay"]
                         mode_label = "出現ごとに1回" if click_mode == "once" else "毎周クリック"
                         log(f"クリック方式: {mode_label}")
-                if loaded_templates is None:
-                    time.sleep(1)
-                    continue
-
                 gray, ox, oy = screen.grab()
                 now = time.monotonic()
                 small_cache = {}
@@ -615,11 +630,21 @@ def _load_sequence_steps(cfg, name, log):
         return None
     steps = []
     for st, tpl in zip(step_cfgs, tpls):
-        th = st["threshold"] if st["threshold"] is not None else cfg["threshold"]
-        retry = st["retry"] if st["retry"] is not None else cfg["cooking_retry_delay"]
+        th = st["threshold"] if st["threshold"] is not None else cfg["sequence_threshold"]
+        retry = st["retry"] if st["retry"] is not None else cfg["sequence_retry_delay"]
         steps.append(_Step(tpl, float(th), float(retry), st["shared"], os.path.basename(tpl.path),
                            st["all"], st["repeat"]))
     return steps
+
+
+def _sequence_signature(cfg, name):
+    """手順の読み込みに関わる設定。これが変わった時だけ読み込み直す
+    （設定画面で通常モードを保存しても、作りかけの料理の状態を消さない）。"""
+    return json.dumps([
+        cfg[f"{name}_steps"], [round(float(x), 4) for x in cfg["scales"]],
+        cfg["min_template_size"], cfg["search_downscale"],
+        cfg["sequence_threshold"], cfg["sequence_retry_delay"],
+    ], sort_keys=True)
 
 
 def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
@@ -635,6 +660,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
     title, place, work = names["title"], names["place"], names["work"]
     reload_config(log)
     active_version = -1
+    active_sig = None
     steps = None
     finish_logged = False
     log(f"{title} 開始")
@@ -644,17 +670,21 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                 cfg, version = get_config_snapshot()
                 if version != active_version:
                     active_version = version
-                    steps = _load_sequence_steps(cfg, name, log)
-                    if steps is not None:
+                    sig = _sequence_signature(cfg, name)
+                    if sig != active_sig:
+                        if active_sig is not None:
+                            log("手順の設定が変わったので読み込み直します（途中の状態はリセット）")
+                        active_sig = sig
+                        steps = _load_sequence_steps(cfg, name, log)
+                        if steps is None:
+                            log(f"[エラー] {title} を止めます。images フォルダと設定を確認してください")
+                            break
                         local = [i for i, st in enumerate(steps) if not st.shared]
                         first, last = local[0], local[-1]
                         stoves, next_id = [], 1
                         ui_scale, last_hit = None, 0.0  # 見つかった倍率（以後はその近くだけ探す）
                         shared_press = {i: _Press() for i, st in enumerate(steps) if st.shared}
                         log("手順: " + " → ".join(f"{i + 1}.{st.label}" for i, st in enumerate(steps)))
-                if steps is None:
-                    time.sleep(1)
-                    continue
 
                 finishing = should_finish()
                 if finishing and not finish_logged:
@@ -668,7 +698,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                 now = time.monotonic()
                 small_cache = {}
                 radius = cfg[f"{name}_stove_radius"]
-                rearm = cfg["rearm_delay"]
+                rearm = cfg["sequence_rearm_delay"]
 
                 def next_local(i):
                     return local[(local.index(i) + 1) % len(local)]
@@ -703,7 +733,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                         _, i, d = max(hits)
                         ui_scale = min(steps[i].tpl.variants, key=lambda v: abs(v.full.shape[1] - d[3])).scale
                         log(f"画面の倍率 {ui_scale:.2f} の近くだけを探します")
-                elif ui_scale is not None and now - last_hit >= cfg["cooking_lost_timeout"]:
+                elif ui_scale is not None and now - last_hit >= cfg["sequence_lost_timeout"]:
                     ui_scale = None
                     log("しばらく見つからないので、全ての倍率で探し直します")
 
@@ -794,7 +824,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                     time.sleep(0.03)
 
                 # 長く見えないコンロは忘れる（カメラが動いた時など）
-                for st in [st for st in stoves if now - st.last_seen >= cfg["cooking_lost_timeout"]]:
+                for st in [st for st in stoves if now - st.last_seen >= cfg["sequence_lost_timeout"]]:
                     if in_progress(st):
                         log(f"{place}#{st.id} が見えなくなりました")
                     stoves.remove(st)
@@ -803,7 +833,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
                     log(f"作りかけの{work}がないので止めます")
                     break
 
-                time.sleep(cfg["cooking_interval"])
+                time.sleep(cfg["sequence_interval"])
 
             except pyautogui.FailSafeException:
                 log("緊急停止しました（マウスが画面の隅に移動しました）")
