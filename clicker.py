@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -13,7 +14,13 @@ try:
 except ImportError:  # 未インストールなら pyautogui で撮影（メインモニターのみ）
     mss = None
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "autoclick_config.json")
+# 設定・画像・ログを置くフォルダ。exe 版では exe のあるフォルダ、
+# Python から動かす時はこのファイルのあるフォルダ。
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(APP_DIR, "autoclick_config.json")
 CONFIG_DIR = os.path.dirname(CONFIG_PATH)
 DEFAULT_CONFIG = {
     "button_names": ["button_1"],
@@ -33,9 +40,43 @@ DEFAULT_CONFIG = {
     "rearm_delay": 0.3,
     # 粗い検索で画面を縮小する倍率（1.0 で縮小なし）。小さいほど速いが見逃しやすい
     "search_downscale": 0.5,
+    # ===== クッキング自動（順番クリック）モード =====
+    # 上から順に押す。文字列か {"template": ..., "threshold": ..., "retry": ..., "shared": ..., "all": ..., "repeat": ...}
+    #   shared=true : コンロの上ではなく画面に1つだけ出るボタン（クッキング開始など）
+    #   all=true    : 見つかったものを全部押す（雪マークなど）
+    #   repeat=true : 次の shared 手順が終わったあと、まだ見えていればもう一度押す（雪玉の操作など）
+    "cooking_steps": [
+        "images/cook_1_pan.png",
+        {"template": "images/cook_2_start.png", "shared": True},
+        "images/flai_spatula.png",
+        "images/cook_4_mitten.png",
+    ],
+    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数
+    "cooking_retry_delay": 1.0,
+    # コンロのボタンがこの秒数まったく見えなければ、そのコンロを忘れる
+    "cooking_lost_timeout": 30.0,
+    # アイコンの中心がこの距離（px）以内なら同じコンロとみなす
+    "cooking_stove_radius": 60,
+    # ===== 雪だるま自動 =====（手順の書き方は cooking_steps と同じ。時間の設定は cooking_* を共用）
+    "snowman_steps": [
+        "images/snow_1_place.png",
+        {"template": "images/snow_2_operate.png", "repeat": True},
+        {"template": "images/snow_3_flake.png", "shared": True, "all": True, "retry": 0.15},
+        "images/snow_4_collect.png",
+    ],
+    # 雪玉が大きくなるとアイコンの位置が上にずれるので広めにする
+    "snowman_stove_radius": 150,
+    # 1回の画面チェックごとの待機秒数
+    "cooking_interval": 0.05,
 }
 
 CLICK_MODES = ("repeat", "once")
+
+# 順番クリックのモード。設定は <name>_steps / <name>_stove_radius
+SEQUENCES = {
+    "cooking": {"title": "クッキング自動", "place": "コンロ", "work": "料理"},
+    "snowman": {"title": "雪だるま自動", "place": "雪台", "work": "雪だるま"},
+}
 COARSE_MARGIN = 0.25      # 粗い検索の候補下限 = threshold - COARSE_MARGIN
 COARSE_MIN_SIZE = 16      # 縮小後のテンプレートがこれより小さくなる場合は縮小しない
 MAX_CANDIDATES = 50       # 1テンプレート・1倍率あたりの精査候補数の上限
@@ -62,6 +103,18 @@ def _build_scales(config):
 
     # np.arange の端数ずれ対策として上限に step の半分を足す
     return np.arange(scale_min, scale_max + scale_step / 2, scale_step)
+
+
+def portable_path(path):
+    """アプリのフォルダ内なら "images/xxx.png" のような相対パスにする（フォルダごと移動しても動く）。"""
+    value = os.path.normpath(str(path).strip())
+    try:
+        rel = os.path.relpath(value, APP_DIR)
+    except ValueError:  # 別ドライブ
+        return value
+    if rel.startswith(".."):
+        return value
+    return rel.replace(os.sep, "/")
 
 
 def _normalize_template_path(path):
@@ -140,7 +193,38 @@ def _normalize_config(raw, log):
     merged["rearm_delay"] = max(0.0, float(merged.get("rearm_delay", DEFAULT_CONFIG["rearm_delay"])))
     merged["search_downscale"] = max(0.2, min(1.0, float(merged.get("search_downscale", DEFAULT_CONFIG["search_downscale"]))))
     merged["scales"] = _build_scales(merged)
+    for name in SEQUENCES:
+        merged[f"{name}_steps"] = _normalize_steps(merged, name, image_dir, candidate_templates, log)
+        key = f"{name}_stove_radius"
+        merged[key] = max(1.0, float(merged.get(key, DEFAULT_CONFIG[key])))
+    merged["cooking_retry_delay"] = max(0.0, float(merged.get("cooking_retry_delay", DEFAULT_CONFIG["cooking_retry_delay"])))
+    merged["cooking_lost_timeout"] = max(1.0, float(merged.get("cooking_lost_timeout", DEFAULT_CONFIG["cooking_lost_timeout"])))
+    merged["cooking_interval"] = max(0.0, float(merged.get("cooking_interval", DEFAULT_CONFIG["cooking_interval"])))
     return merged
+
+
+def _normalize_steps(merged, name, image_dir, candidate_templates, log):
+    """<name>_steps を [{"path", "threshold", "retry", "shared", "all", "repeat"}] に揃える。"""
+    key = f"{name}_steps"
+    raw_steps = merged.get(key, DEFAULT_CONFIG[key])
+    if not isinstance(raw_steps, list):
+        log(f"[警告] {key} が不正です。デフォルトの手順を使います。")
+        raw_steps = DEFAULT_CONFIG[key]
+    steps = []
+    for entry in raw_steps:
+        options = entry if isinstance(entry, dict) else {"template": entry}
+        path = _resolve_template_path(options.get("template", ""), candidate_templates, image_dir)
+        if not path:
+            continue
+        steps.append({
+            "path": path,
+            "threshold": options.get("threshold"),
+            "retry": options.get("retry"),
+            "shared": bool(options.get("shared", False)),
+            "all": bool(options.get("all", False)),
+            "repeat": bool(options.get("repeat", False)),
+        })
+    return steps
 
 
 def reload_config(log):
@@ -248,16 +332,19 @@ def load_templates(template_paths, log, scales=None, min_template_size=None, dow
 
 # ===== 検出 =====
 
-def find_matches(gray, tpl, threshold, small_cache=None):
+def find_matches(gray, tpl, threshold, small_cache=None, scale_range=None):
     """gray 内で tpl に一致する位置を (score, cx, cy, w, h) のリストで返す。
 
     縮小画像でマスクなしの粗い検索をして候補を絞り、候補の周辺だけを
     元解像度（マスクがあればマスク付き）で精査する。
+    scale_range=(lo, hi) を渡すと、その範囲の倍率だけを調べる。
     """
     if small_cache is None:
         small_cache = {}
     found = []
     for v in tpl.variants:
+        if scale_range is not None and not (scale_range[0] <= v.scale <= scale_range[1]):
+            continue
         th, tw = v.full.shape
         if th > gray.shape[0] or tw > gray.shape[1]:
             continue
@@ -462,3 +549,267 @@ def run(is_running, log):
                 time.sleep(1)
 
     log("クリックループ終了")
+
+
+# ===== クッキング自動（順番クリック） =====
+
+@dataclass
+class _Press:
+    """1つのボタンの押し方の状態（出てきたら押す・見えたままなら retry 秒ごとに押し直す）。"""
+    armed: bool = True        # 新しく出てきた（まだ押していない）
+    clicked: bool = False     # 1回以上押した
+    last_click: float = 0.0
+    last_seen: float = 0.0
+
+    def want_click(self, now, retry):
+        return self.armed or now - self.last_click >= retry
+
+    def did_click(self, now):
+        self.armed, self.clicked, self.last_click = False, True, now
+
+    def unseen(self, now, rearm_delay):
+        if now - self.last_seen >= rearm_delay:
+            self.armed = True
+
+
+@dataclass
+class _Stove:
+    id: int
+    x: int
+    y: int
+    step: int                  # 今の手順（steps のインデックス、コンロ上の手順のみ）
+    press: _Press = field(default_factory=_Press)
+    shared_done: bool = False  # 待っている共通ボタン（クッキング開始など）を押した
+    done: bool = False         # 最後の手順を押し終えた
+    last_seen: float = 0.0     # 今か次の手順のボタンを最後に見た時刻
+
+
+@dataclass
+class _Step:
+    tpl: _Template
+    threshold: float
+    retry: float
+    shared: bool
+    label: str
+    all: bool = False
+    repeat: bool = False
+
+
+def _load_sequence_steps(cfg, name, log):
+    key = f"{name}_steps"
+    step_cfgs = cfg[key]
+    if not step_cfgs:
+        log(f"[エラー] {key} が空です。設定を見直してください")
+        return None
+    if all(st["shared"] for st in step_cfgs):
+        log(f"[エラー] {key} に shared でない手順が1つもありません")
+        return None
+    tpls = load_templates(
+        [st["path"] for st in step_cfgs], log,
+        scales=cfg["scales"],
+        min_template_size=cfg["min_template_size"],
+        downscale=cfg["search_downscale"],
+    )
+    if tpls is None:
+        log("[エラー] 手順の画像を読み込めません。設定を見直してください")
+        return None
+    steps = []
+    for st, tpl in zip(step_cfgs, tpls):
+        th = st["threshold"] if st["threshold"] is not None else cfg["threshold"]
+        retry = st["retry"] if st["retry"] is not None else cfg["cooking_retry_delay"]
+        steps.append(_Step(tpl, float(th), float(retry), st["shared"], os.path.basename(tpl.path),
+                           st["all"], st["repeat"]))
+    return steps
+
+
+def run_sequence(is_running, log, should_finish=lambda: False, name="cooking"):
+    """<name>_steps を上から順にクリックする。コンロが複数あっても、コンロごとに順番を守る。
+
+    - コンロの上に出るボタンは、出た位置でコンロを見分けて、コンロごとに
+      「今の手順」を押し、「次の手順」が見えたら次へ進む。最後の次は最初に戻る。
+    - shared の手順（クッキング開始など）は、それを待っているコンロがあれば押す。
+    - should_finish() が True になったら新しい料理は始めず、作りかけの料理を
+      最後の手順まで終えてから戻る。
+    """
+    names = SEQUENCES[name]
+    title, place, work = names["title"], names["place"], names["work"]
+    reload_config(log)
+    active_version = -1
+    steps = None
+    finish_logged = False
+    log(f"{title} 開始")
+    with ScreenCapture() as screen:
+        while is_running():
+            try:
+                cfg, version = get_config_snapshot()
+                if version != active_version:
+                    active_version = version
+                    steps = _load_sequence_steps(cfg, name, log)
+                    if steps is not None:
+                        local = [i for i, st in enumerate(steps) if not st.shared]
+                        first, last = local[0], local[-1]
+                        stoves, next_id = [], 1
+                        ui_scale, last_hit = None, 0.0  # 見つかった倍率（以後はその近くだけ探す）
+                        shared_press = {i: _Press() for i, st in enumerate(steps) if st.shared}
+                        log("手順: " + " → ".join(f"{i + 1}.{st.label}" for i, st in enumerate(steps)))
+                if steps is None:
+                    time.sleep(1)
+                    continue
+
+                finishing = should_finish()
+                if finishing and not finish_logged:
+                    log(f"終了待ち: 作りかけの{work}を終えたら止めます")
+                    finish_logged = True
+                elif not finishing and finish_logged:
+                    log("終了待ちを取り消しました")
+                    finish_logged = False
+
+                gray, ox, oy = screen.grab()
+                now = time.monotonic()
+                small_cache = {}
+                radius = cfg[f"{name}_stove_radius"]
+                rearm = cfg["rearm_delay"]
+
+                def next_local(i):
+                    return local[(local.index(i) + 1) % len(local)]
+
+                def shared_between(a, b):
+                    """コンロ手順 a と b の間にある shared 手順。"""
+                    if b > a:
+                        between = range(a + 1, b)
+                    else:
+                        between = list(range(a + 1, len(steps))) + list(range(0, b))
+                    return [i for i in between if steps[i].shared]
+
+                def in_progress(st):
+                    if st.done:
+                        return False
+                    return st.step != first or st.press.clicked
+
+                def waiting_shared(st):
+                    """押したあと shared ボタン待ちのコンロか。"""
+                    return st.press.clicked and bool(shared_between(st.step, next_local(st.step)))
+
+                scale_range = None
+                if ui_scale is not None:
+                    span = cfg["scale_step"] * 1.01
+                    scale_range = (ui_scale - span, ui_scale + span)
+                dets = {i: dedupe(find_matches(gray, st.tpl, st.threshold, small_cache, scale_range))
+                        for i, st in enumerate(steps)}
+                hits = [(d[0], i, d) for i, ds in dets.items() for d in ds]
+                if hits:
+                    last_hit = now
+                    if ui_scale is None:
+                        _, i, d = max(hits)
+                        ui_scale = min(steps[i].tpl.variants, key=lambda v: abs(v.full.shape[1] - d[3])).scale
+                        log(f"画面の倍率 {ui_scale:.2f} の近くだけを探します")
+                elif ui_scale is not None and now - last_hit >= cfg["cooking_lost_timeout"]:
+                    ui_scale = None
+                    log("しばらく見つからないので、全ての倍率で探し直します")
+
+                # --- コンロ上のボタンを、近いコンロに割り当てる ---
+                seen = {}  # stove.id -> {step: det}
+                for i in local:
+                    for det in dets[i]:
+                        _, cx, cy, _, _ = det
+                        near = [(abs(cx - st.x) + abs(cy - st.y), st.id, st) for st in stoves
+                                if abs(cx - st.x) <= radius and abs(cy - st.y) <= radius]
+                        if near:
+                            st = min(near)[2]
+                        else:
+                            if finishing and i == first:
+                                continue  # 終了待ち中は新しい料理を始めない
+                            st = _Stove(next_id, cx, cy, i, last_seen=now)
+                            next_id += 1
+                            stoves.append(st)
+                            log(f"{place}#{st.id} を見つけました（手順{i + 1} {steps[i].label}）")
+                        seen.setdefault(st.id, {}).setdefault(i, det)
+
+                clicks = []
+                blocked_new = any(waiting_shared(st) and not st.shared_done
+                                  for st in stoves if in_progress(st))
+
+                for st in stoves:
+                    found = seen.get(st.id, {})
+                    nxt = next_local(st.step)
+                    if nxt != st.step and nxt in found and not (finishing and nxt == first):
+                        if st.step == last and not st.done:
+                            log(f"{place}#{st.id} {work}完了")
+                        st.step, st.press, st.shared_done, st.done = nxt, _Press(), False, False
+                        log(f"{place}#{st.id} → 手順{nxt + 1} ({steps[nxt].label})")
+                    det = found.get(st.step)
+                    if det is None:
+                        st.press.unseen(now, rearm)
+                        if (st.step == last and st.press.clicked and not st.done
+                                and now - st.press.last_seen >= rearm):
+                            st.done = True
+                            log(f"{place}#{st.id} {work}完了")
+                        continue
+                    st.last_seen = st.press.last_seen = now
+                    st.x, st.y = det[1], det[2]
+                    if st.done:
+                        continue
+                    if st.step == first and not st.press.clicked:
+                        # 新しい料理を始めるのは、終了待ちでなく、
+                        # ほかのコンロが「クッキング開始」待ちでない時だけ
+                        if finishing or blocked_new:
+                            continue
+                        blocked_new = bool(shared_between(st.step, next_local(st.step)))
+                    if waiting_shared(st):
+                        # フライパンは押したあとも見えたままなので、「クッキング開始」が
+                        # 出ている間や押した後に押し直すと、メニューを閉じてしまう。
+                        # repeat の手順（雪玉の操作）は、shared 手順が終わったらまた押す。
+                        pending = shared_between(st.step, next_local(st.step))
+                        if any(dets[g] for g in pending):
+                            continue
+                        if st.shared_done and not steps[st.step].repeat:
+                            continue
+                    if st.press.want_click(now, steps[st.step].retry):
+                        st.press.did_click(now)
+                        st.shared_done = False
+                        clicks.append((det, f"{place}#{st.id} 手順{st.step + 1} {steps[st.step].label}"))
+
+                # --- shared ボタン（クッキング開始など） ---
+                for g, press in shared_press.items():
+                    if not dets[g]:
+                        press.unseen(now, rearm)
+                        continue
+                    press.last_seen = now
+                    waiters = [st for st in stoves if in_progress(st) and waiting_shared(st)
+                               and g in shared_between(st.step, next_local(st.step))]
+                    if not waiters and finishing:
+                        continue
+                    if press.want_click(now, steps[g].retry):
+                        press.did_click(now)
+                        for st in waiters:
+                            st.shared_done = True
+                        targets = dets[g] if steps[g].all else dets[g][:1]
+                        clicks.extend((d, f"手順{g + 1} {steps[g].label}") for d in targets)
+
+                for det, label in clicks:
+                    if not is_running():
+                        break
+                    _click(ox + det[1], oy + det[2])
+                    log(f"{label} をクリック (score={det[0]:.3f})")
+                    time.sleep(0.03)
+
+                # 長く見えないコンロは忘れる（カメラが動いた時など）
+                for st in [st for st in stoves if now - st.last_seen >= cfg["cooking_lost_timeout"]]:
+                    if in_progress(st):
+                        log(f"{place}#{st.id} が見えなくなりました")
+                    stoves.remove(st)
+
+                if finishing and not any(in_progress(st) for st in stoves):
+                    log(f"作りかけの{work}がないので止めます")
+                    break
+
+                time.sleep(cfg["cooking_interval"])
+
+            except pyautogui.FailSafeException:
+                log("緊急停止しました（マウスが画面の隅に移動しました）")
+                break
+            except Exception as e:
+                log(f"[エラー] {type(e).__name__}: {e}")
+                time.sleep(1)
+
+    log(f"{title} 終了")

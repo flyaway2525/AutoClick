@@ -27,7 +27,7 @@ if not %errorlevel%==0 (
     exit /b 1
 )
 
-.venv\Scripts\python.exe -m pip install pyautogui opencv-python numpy keyboard pillow pystray mss
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 if not %errorlevel%==0 (
     echo 依存パッケージのインストールに失敗しました。
     pause

@@ -4,7 +4,7 @@
     "button_1.png"
   ],
   "candidate_templates": [
-    "C:\\GitHub\\AutoClick\\AutoClick\\images\\button_1.png",
+    "images/button_1.png",
     "images/flai_spatula.png"
   ],
   "threshold": 0.7,
@@ -16,5 +16,33 @@
   "min_template_size": 10,
   "click_mode": "repeat",
   "rearm_delay": 0.3,
-  "search_downscale": 0.5
+  "search_downscale": 0.5,
+  "cooking_steps": [
+    "images/cook_1_pan.png",
+    {
+      "template": "images/cook_2_start.png",
+      "shared": true
+    },
+    "images/flai_spatula.png",
+    "images/cook_4_mitten.png"
+  ],
+  "cooking_retry_delay": 1.0,
+  "cooking_lost_timeout": 30.0,
+  "cooking_interval": 0.05,
+  "cooking_stove_radius": 60,
+  "snowman_steps": [
+    "images/snow_1_place.png",
+    {
+      "template": "images/snow_2_operate.png",
+      "repeat": true
+    },
+    {
+      "template": "images/snow_3_flake.png",
+      "shared": true,
+      "all": true,
+      "retry": 0.15
+    },
+    "images/snow_4_collect.png"
+  ],
+  "snowman_stove_radius": 150
 }

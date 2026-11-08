@@ -9,3 +9,9 @@ __pycache__/
 
 # 実行時ログ
 autoclick_error.log
+autoclick.log
+autoclick.log.old
+
+# exe のビルド
+build/
+dist/
