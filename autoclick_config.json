@@ -42,9 +42,10 @@
     "images/snow_4_collect.png"
   ],
   "snowman_stove_radius": 150,
-  "sequence_retry_delay": 1.0,
+  "sequence_retry_delay": 5.0,
   "sequence_lost_timeout": 30.0,
   "sequence_interval": 0.05,
   "sequence_threshold": 0.7,
-  "sequence_rearm_delay": 0.3
+  "sequence_rearm_delay": 0.3,
+  "sequence_after_click": 0.4
 }

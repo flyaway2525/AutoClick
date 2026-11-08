@@ -272,7 +272,9 @@ start.bat
 - 「クッキング開始」は画面に1つしか出ないので、あるコンロのフライパンを押したら、
   「クッキング開始」を押し終えるまで別のコンロのフライパンは押しません
 - 途中で ON にしても、見えているボタンの手順から始めます
-- 押したのにまだ見えている場合は `sequence_retry_delay` 秒ごとに押し直します
+- **連打はしません。** ボタンは1回出るごとに1回だけ押します。押したあと `sequence_retry_delay`（5秒）たってもまだ残っている時だけ押し直します（雪マークだけは素早く押します）
+- **押す直前に、その場所をもう一度撮って確かめます。** 画面が切り替わっていたら押しません（前の画面の位置で別のボタンを押さないため）
+- 押したあとは `sequence_after_click`（0.4秒）待ってから次のボタンを探します
 - 一度ボタンを見つけたら、その大きさの近くだけを探して速くします
 
 ### 設定
@@ -290,7 +292,8 @@ start.bat
 
 "sequence_threshold": 0.70,
 "sequence_rearm_delay": 0.3,
-"sequence_retry_delay": 1.0,
+"sequence_retry_delay": 5.0,
+"sequence_after_click": 0.4,
 "sequence_lost_timeout": 30.0,
 "sequence_interval": 0.05
 ```
@@ -300,7 +303,8 @@ start.bat
 | `cooking_stove_radius` | アイコンの中心がこの距離（px）以内なら同じコンロとみなす（雪だるまは `snowman_stove_radius`） |
 | `sequence_threshold` | 一致しきい値（手順ごとの `threshold` が優先） |
 | `sequence_rearm_delay` | ボタンが消えてからこの秒数たったら「新しく出た」とみなす |
-| `sequence_retry_delay` | 押したのにまだ見えている時、押し直すまでの秒数 |
+| `sequence_retry_delay` | 押したのにまだ見えている時、押し直すまでの秒数（短いと連打になる） |
+| `sequence_after_click` | 押したあと、画面が切り替わるのを待つ秒数 |
 | `sequence_lost_timeout` | コンロのボタンがこの秒数見えなければ、そのコンロを忘れる（終了待ちもこれで終わる） |
 | `sequence_interval` | 画面チェックごとの待ち秒数 |
 

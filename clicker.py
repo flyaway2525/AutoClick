@@ -68,8 +68,11 @@ DEFAULT_CONFIG = {
     "sequence_threshold": 0.70,
     # ボタンが消えてからこの秒数たったら「新しく出た」とみなす
     "sequence_rearm_delay": 0.3,
-    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数
-    "sequence_retry_delay": 1.0,
+    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数。
+    # ボタンは押したあともしばらく（画面が切り替わるまで）見えているので、短いと連打になる
+    "sequence_retry_delay": 5.0,
+    # クリックしたあと、画面が切り替わるのを待つ秒数（その間は次のボタンを探さない）
+    "sequence_after_click": 0.4,
     # コンロ（雪台）のボタンがこの秒数まったく見えなければ、そのコンロを忘れる
     "sequence_lost_timeout": 30.0,
     # 1回の画面チェックごとの待機秒数
@@ -222,6 +225,7 @@ def _normalize_config(raw, log):
     merged["sequence_threshold"] = max(0.0, min(1.0, float(merged["sequence_threshold"])))
     merged["sequence_rearm_delay"] = max(0.0, float(merged["sequence_rearm_delay"]))
     merged["sequence_retry_delay"] = max(0.0, float(merged["sequence_retry_delay"]))
+    merged["sequence_after_click"] = max(0.0, float(merged["sequence_after_click"]))
     merged["sequence_lost_timeout"] = max(1.0, float(merged["sequence_lost_timeout"]))
     merged["sequence_interval"] = max(0.0, float(merged["sequence_interval"]))
     merged["sequence_resync_delay"] = max(0.2, float(merged["sequence_resync_delay"]))
@@ -466,6 +470,51 @@ class ScreenCapture:
             return cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), self._area["left"], self._area["top"]
         frame = np.array(pyautogui.screenshot())
         return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), 0, 0
+
+    def grab_region(self, left, top, width, height):
+        """スクリーン座標の一部だけを撮ってグレースケールで返す（押す直前の確認用）。"""
+        if self._sct is not None:
+            area = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+            return cv2.cvtColor(np.array(self._sct.grab(area)), cv2.COLOR_BGRA2GRAY)
+        frame = np.array(pyautogui.screenshot(region=(int(left), int(top), int(width), int(height))))
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+
+CONFIRM_PAD = 8  # 押す直前の確認で、ボタンの周りを何 px 余分に撮るか
+
+
+def confirm_match(screen, tpl, det, threshold, ox, oy):
+    """押す直前に、その場所をもう一度撮って、まだ同じボタンがあるか確かめる。
+
+    画面を撮ってから押すまでの間に画面が切り替わると、前の画面の位置で
+    別のボタンを押してしまうため。あれば最新の (score, cx, cy, w, h)、無ければ None。
+    """
+    _, cx, cy, w, h = det
+    variant = next((v for v in tpl.variants if v.full.shape == (h, w)), None)
+    if variant is None:
+        return det
+    x0, y0 = cx - w // 2 - CONFIRM_PAD, cy - h // 2 - CONFIRM_PAD
+    rw, rh = w + 2 * CONFIRM_PAD, h + 2 * CONFIRM_PAD
+    roi = None
+    grab_region = getattr(screen, "grab_region", None)
+    if grab_region is not None:
+        try:
+            roi = grab_region(ox + x0, oy + y0, rw, rh)
+        except Exception:
+            roi = None  # 画面の端など。全体を撮り直して切り出す
+    if roi is None:
+        gray, _, _ = screen.grab()
+        cx0, cy0 = max(0, x0), max(0, y0)
+        roi = gray[cy0:y0 + rh, cx0:x0 + rw]
+        x0, y0 = cx0, cy0
+    if roi.shape[0] < h or roi.shape[1] < w:
+        return None
+    result = cv2.matchTemplate(roi, variant.full, cv2.TM_CCOEFF_NORMED, mask=variant.mask)
+    result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    _, score, _, loc = cv2.minMaxLoc(result)
+    if score < threshold:
+        return None
+    return (float(score), x0 + loc[0] + w // 2, y0 + loc[1] + h // 2, w, h)
 
 
 # ===== クリックループ =====
@@ -849,9 +898,15 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                         if st.shared_done and not steps[st.step].repeat:
                             continue
                     if st.press.want_click(now, steps[st.step].retry):
+                        saved = (st.press.armed, st.press.clicked, st.press.last_click, st.shared_done)
+
+                        def undo(st=st, saved=saved):
+                            st.press.armed, st.press.clicked, st.press.last_click, st.shared_done = saved
+
                         st.press.did_click(now)
                         st.shared_done = False
-                        clicks.append((det, f"{place}#{st.id} 手順{st.step + 1} {steps[st.step].label}"))
+                        clicks.append((det, f"{place}#{st.id} 手順{st.step + 1} {steps[st.step].label}",
+                                       st.step, undo))
 
                 # --- shared ボタン（クッキング開始など） ---
                 for g, press in shared_press.items():
@@ -864,18 +919,42 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                     if not waiters and finishing:
                         continue
                     if press.want_click(now, steps[g].retry):
+                        saved = (press.armed, press.clicked, press.last_click,
+                                 [(st, st.shared_done) for st in waiters])
+
+                        def undo(press=press, saved=saved):
+                            press.armed, press.clicked, press.last_click, flags = saved
+                            for st, flag in flags:
+                                st.shared_done = flag
+
                         press.did_click(now)
                         for st in waiters:
                             st.shared_done = True
-                        targets = dets[g] if steps[g].all else dets[g][:1]
-                        clicks.extend((d, f"手順{g + 1} {steps[g].label}") for d in targets)
+                        if steps[g].all:
+                            # 全部押す手順（雪マーク）は、1つ押せなくてもほかは押す
+                            clicks.extend((d, f"手順{g + 1} {steps[g].label}", g, None) for d in dets[g])
+                        else:
+                            clicks.append((dets[g][0], f"手順{g + 1} {steps[g].label}", g, undo))
 
-                for det, label in clicks:
+                settle = False
+                for det, label, idx, undo in clicks:
                     if not is_running():
                         break
-                    _click(ox + det[1], oy + det[2])
-                    log(f"{label} をクリック (score={det[0]:.3f})")
+                    # 押す直前にもう一度確かめる（画面が切り替わっていたら押さない）
+                    fresh = confirm_match(screen, steps[idx].tpl, det, steps[idx].threshold, ox, oy)
+                    if fresh is None:
+                        if undo is not None:
+                            undo()
+                        log(f"{label} は画面が変わったので押しませんでした")
+                        continue
+                    _click(ox + fresh[1], oy + fresh[2])
+                    log(f"{label} をクリック (score={fresh[0]:.3f})")
+                    if not steps[idx].all:
+                        settle = True
                     time.sleep(0.03)
+                if settle and cfg["sequence_after_click"] > 0:
+                    # 押したあと画面が切り替わるのを待つ（切り替わり途中の画面で次を探さない）
+                    time.sleep(cfg["sequence_after_click"])
 
                 # 長く見えないコンロは忘れる（カメラが動いた時など）
                 for st in [st for st in stoves if now - st.last_seen >= cfg["sequence_lost_timeout"]]:
