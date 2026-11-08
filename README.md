@@ -3,6 +3,8 @@
 OpenCV の画像認識（テンプレートマッチング）を使用して、画面上の特定アイコン・ボタンを自動的にクリックし続けるツールです。  
 Windows のタスクトレイに常駐し、トレイアイコンのクリックで ON / OFF を切り替えられます。
 
+**ダウンロード（Python 不要の exe 版）: [最新版のリリース](https://github.com/flyaway2525/AutoClick/releases/latest)** の Assets から `AutoClick-v*.zip` を落として、展開した `AutoClick.exe` を起動してください。
+
 ---
 
 ## 特徴
