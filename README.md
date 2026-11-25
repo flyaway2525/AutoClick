@@ -236,7 +236,7 @@ start.bat
 |---|---|---|
 | 1 | `images/cook_1_pan.png` | フライパンのアイコン（コンロの上） |
 | 2 | `images/cook_2_start.png` | 「クッキング開始」ボタン（画面に1つ） |
-| 3 | `images/flai_spatula.png` | フライ返し（時間制限つき。見えている間は 1 秒ごとに押す） |
+| 3 | `images/flai_spatula.png` | フライ返し（時間制限つき。見えている間は 0.7 秒ごとに押す） |
 | 4 | `images/cook_4_mitten.png` | ミトン（これで料理完了） |
 
 ### ON / OFF
@@ -274,7 +274,7 @@ start.bat
 - 「クッキング開始」は画面に1つしか出ないので、あるコンロのフライパンを押したら、
   「クッキング開始」を押し終えるまで別のコンロのフライパンは押しません
 - 途中で ON にしても、見えているボタンの手順から始めます
-- **連打はしません。** ボタンは1回出るごとに1回だけ押します。押したあと `sequence_retry_delay`（5秒）たってもまだ残っている時だけ押し直します（雪マークだけは素早く押します）
+- ボタンは出たら押し、押したあともまだ残っている時は `sequence_retry_delay`（0.7秒）ごとに押し直します（雪マークだけはもっと素早く押します）。5秒も待つと料理が進まないので、待ち時間はどれも 0.7 秒にそろえています
 - **押す直前に、その場所をもう一度撮って確かめます。** 画面が切り替わっていたら押しません（前の画面の位置で別のボタンを押さないため）
 - 押したあとは `sequence_after_click`（0.4秒）待ってから次のボタンを探します
 - 一度ボタンを見つけたら、その大きさの近くだけを探して速くします
@@ -286,15 +286,15 @@ start.bat
 ```json
 "cooking_steps": [
   "images/cook_1_pan.png",
-  {"template": "images/cook_2_start.png", "shared": true, "delay": 1.0},
-  {"template": "images/flai_spatula.png", "retry": 1.0},
+  {"template": "images/cook_2_start.png", "shared": true, "delay": 0.7},
+  "images/flai_spatula.png",
   "images/cook_4_mitten.png"
 ],
 "cooking_stove_radius": 60,
 
 "sequence_threshold": 0.70,
 "sequence_rearm_delay": 0.3,
-"sequence_retry_delay": 5.0,
+"sequence_retry_delay": 0.7,
 "sequence_after_click": 0.4,
 "sequence_lost_timeout": 30.0,
 "sequence_interval": 0.05
@@ -305,7 +305,7 @@ start.bat
 | `cooking_stove_radius` | アイコンの中心がこの距離（px）以内なら同じコンロとみなす（雪だるまは `snowman_stove_radius`） |
 | `sequence_threshold` | 一致しきい値（手順ごとの `threshold` が優先） |
 | `sequence_rearm_delay` | ボタンが消えてからこの秒数たったら「新しく出た」とみなす |
-| `sequence_retry_delay` | 押したのにまだ見えている時、押し直すまでの秒数（短いと連打になる） |
+| `sequence_retry_delay` | 押したのにまだ見えている時、押し直すまでの秒数（どのボタンも共通。0.7） |
 | `sequence_after_click` | 押したあと、画面が切り替わるのを待つ秒数 |
 | `sequence_lost_timeout` | コンロのボタンがこの秒数見えなければ、そのコンロを忘れる（終了待ちもこれで終わる） |
 | `sequence_interval` | 画面チェックごとの待ち秒数 |
@@ -342,7 +342,7 @@ start.bat
 | `"all": true` | 見つかったものを全部押す（雪マーク） |
 | `"repeat": true` | 次の shared 手順が終わったら、もう一度押す（雪玉の操作） |
 | `"retry": 秒` | 見えている間、この秒数ごとに押し直す |
-| `"delay": 秒` | ボタンが出てから押すまで待つ秒数。出てくる途中に押すと効かないボタン用（クッキング開始は 1.0） |
+| `"delay": 秒` | ボタンが出てから押すまで待つ秒数。出てくる途中に押すと効かないボタン用（クッキング開始は 0.7） |
 
 ### モードは同時に動きません
 

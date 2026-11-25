@@ -48,11 +48,10 @@ DEFAULT_CONFIG = {
     #   delay=秒    : ボタンが出てから押すまで待つ秒数（出てくるアニメーション中に押すと効かないボタン用）
     "cooking_steps": [
         "images/cook_1_pan.png",
-        # クッキング開始は出てくる途中で押すと効かないので、出てから 1 秒待って押す
-        {"template": "images/cook_2_start.png", "shared": True, "delay": 1.0},
-        # フライ返しは時間制限つきで、見えている間に何度か押す必要がある。
-        # 押し直しが遅いと料理が進まない（5秒だと1皿あたり 8秒→19秒に遅くなった）ので 1 秒ごと
-        {"template": "images/flai_spatula.png", "retry": 1.0},
+        # クッキング開始は出てくる途中で押すと効かないので、出てから 0.7 秒待って押す
+        {"template": "images/cook_2_start.png", "shared": True, "delay": 0.7},
+        # フライ返しは時間制限つきで、見えている間に何度か押す必要がある（押し直しは sequence_retry_delay）
+        "images/flai_spatula.png",
         "images/cook_4_mitten.png",
     ],
     # アイコンの中心がこの距離（px）以内なら同じコンロとみなす
@@ -72,9 +71,10 @@ DEFAULT_CONFIG = {
     "sequence_threshold": 0.70,
     # ボタンが消えてからこの秒数たったら「新しく出た」とみなす
     "sequence_rearm_delay": 0.3,
-    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数。
-    # ボタンは押したあともしばらく（画面が切り替わるまで）見えているので、短いと連打になる
-    "sequence_retry_delay": 5.0,
+    # クリックしたのにまだ見えている時、もう一度クリックするまでの秒数（どのボタンも共通）。
+    # 長いと料理が進まない（5秒だとフライ返しの段階が 1皿あたり 8秒→19秒になった）。
+    # 切り替わり途中の画面を押さないよう、押す直前に確かめているので短くても誤クリックしない
+    "sequence_retry_delay": 0.7,
     # クリックしたあと、画面が切り替わるのを待つ秒数（その間は次のボタンを探さない）
     "sequence_after_click": 0.4,
     # コンロ（雪台）のボタンがこの秒数まったく見えなければ、そのコンロを忘れる
@@ -485,6 +485,7 @@ class ScreenCapture:
         return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
 
+SHARED_WAIT_RETRY = 1.5  # 共通ボタン（クッキング開始）待ちの手順を押し直すまでの最短秒数
 CONFIRM_PAD = 8  # 押す直前の確認で、ボタンの周りを何 px 余分に撮るか
 
 
@@ -914,7 +915,12 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                             continue
                         if st.shared_done and not steps[st.step].repeat:
                             continue
-                    if st.press.want_click(now, steps[st.step].retry, steps[st.step].delay):
+                    retry = steps[st.step].retry
+                    if waiting_shared(st):
+                        # フライパンは押したあとも見えたまま。クッキング開始が出る前（約1秒）に
+                        # 押し直すとメニューを閉じてしまうので、開始待ちの間だけ少し長く待つ
+                        retry = max(retry, SHARED_WAIT_RETRY)
+                    if st.press.want_click(now, retry, steps[st.step].delay):
                         saved = (st.press.armed, st.press.clicked, st.press.last_click, st.shared_done)
 
                         def undo(st=st, saved=saved):
