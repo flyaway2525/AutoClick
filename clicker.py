@@ -45,9 +45,11 @@ DEFAULT_CONFIG = {
     #   shared=true : コンロの上ではなく画面に1つだけ出るボタン（クッキング開始など）
     #   all=true    : 見つかったものを全部押す（雪マークなど）
     #   repeat=true : 次の shared 手順が終わったあと、まだ見えていればもう一度押す（雪玉の操作など）
+    #   delay=秒    : ボタンが出てから押すまで待つ秒数（出てくるアニメーション中に押すと効かないボタン用）
     "cooking_steps": [
         "images/cook_1_pan.png",
-        {"template": "images/cook_2_start.png", "shared": True},
+        # クッキング開始は出てくる途中で押すと効かないので、出てから 1 秒待って押す
+        {"template": "images/cook_2_start.png", "shared": True, "delay": 1.0},
         "images/flai_spatula.png",
         "images/cook_4_mitten.png",
     ],
@@ -253,6 +255,7 @@ def _normalize_steps(merged, name, image_dir, candidate_templates, log):
             "shared": bool(options.get("shared", False)),
             "all": bool(options.get("all", False)),
             "repeat": bool(options.get("repeat", False)),
+            "delay": max(0.0, float(options.get("delay", 0.0) or 0.0)),
         })
     return steps
 
@@ -632,9 +635,18 @@ class _Press:
     clicked: bool = False     # 1回以上押した
     last_click: float = 0.0
     last_seen: float = 0.0
+    appeared: float = 0.0     # 今回出てきた時刻（0 = まだ見ていない）
 
-    def want_click(self, now, retry):
-        return self.armed or now - self.last_click >= retry
+    def seen(self, now):
+        if self.appeared == 0.0:
+            self.appeared = now
+        self.last_seen = now
+
+    def want_click(self, now, retry, delay=0.0):
+        if self.armed:
+            # 出てきてすぐはアニメーション中で押しても効かないことがあるので delay 秒待つ
+            return now - self.appeared >= delay
+        return now - self.last_click >= retry
 
     def did_click(self, now):
         self.armed, self.clicked, self.last_click = False, True, now
@@ -642,6 +654,7 @@ class _Press:
     def unseen(self, now, rearm_delay):
         if now - self.last_seen >= rearm_delay:
             self.armed = True
+            self.appeared = 0.0
 
 
 @dataclass
@@ -667,6 +680,7 @@ class _Step:
     label: str
     all: bool = False
     repeat: bool = False
+    delay: float = 0.0
 
 
 def _load_sequence_steps(cfg, name, log):
@@ -692,7 +706,7 @@ def _load_sequence_steps(cfg, name, log):
         th = st["threshold"] if st["threshold"] is not None else cfg["sequence_threshold"]
         retry = st["retry"] if st["retry"] is not None else cfg["sequence_retry_delay"]
         steps.append(_Step(tpl, float(th), float(retry), st["shared"], os.path.basename(tpl.path),
-                           st["all"], st["repeat"]))
+                           st["all"], st["repeat"], st["delay"]))
     return steps
 
 
@@ -878,7 +892,8 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                             st.done = True
                             log(f"{place}#{st.id} {work}完了")
                         continue
-                    st.last_seen = st.press.last_seen = now
+                    st.last_seen = now
+                    st.press.seen(now)
                     st.x, st.y = det[1], det[2]
                     if st.done:
                         continue
@@ -897,7 +912,7 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                             continue
                         if st.shared_done and not steps[st.step].repeat:
                             continue
-                    if st.press.want_click(now, steps[st.step].retry):
+                    if st.press.want_click(now, steps[st.step].retry, steps[st.step].delay):
                         saved = (st.press.armed, st.press.clicked, st.press.last_click, st.shared_done)
 
                         def undo(st=st, saved=saved):
@@ -913,12 +928,12 @@ def run_sequence(is_running, log, should_finish=lambda: False, name="cooking", n
                     if not dets[g]:
                         press.unseen(now, rearm)
                         continue
-                    press.last_seen = now
+                    press.seen(now)
                     waiters = [st for st in stoves if in_progress(st) and waiting_shared(st)
                                and g in shared_between(st.step, next_local(st.step))]
                     if not waiters and finishing:
                         continue
-                    if press.want_click(now, steps[g].retry):
+                    if press.want_click(now, steps[g].retry, steps[g].delay):
                         saved = (press.armed, press.clicked, press.last_click,
                                  [(st, st.shared_done) for st in waiters])
 

@@ -21,7 +21,8 @@
     "images/cook_1_pan.png",
     {
       "template": "images/cook_2_start.png",
-      "shared": true
+      "shared": true,
+      "delay": 1.0
     },
     "images/flai_spatula.png",
     "images/cook_4_mitten.png"

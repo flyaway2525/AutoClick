@@ -286,7 +286,7 @@ start.bat
 ```json
 "cooking_steps": [
   "images/cook_1_pan.png",
-  {"template": "images/cook_2_start.png", "shared": true},
+  {"template": "images/cook_2_start.png", "shared": true, "delay": 1.0},
   {"template": "images/flai_spatula.png", "retry": 0.3},
   "images/cook_4_mitten.png"
 ],
@@ -342,6 +342,7 @@ start.bat
 | `"all": true` | 見つかったものを全部押す（雪マーク） |
 | `"repeat": true` | 次の shared 手順が終わったら、もう一度押す（雪玉の操作） |
 | `"retry": 秒` | 見えている間、この秒数ごとに押し直す |
+| `"delay": 秒` | ボタンが出てから押すまで待つ秒数。出てくる途中に押すと効かないボタン用（クッキング開始は 1.0） |
 
 ### モードは同時に動きません
 
