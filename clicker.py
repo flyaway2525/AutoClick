@@ -50,7 +50,9 @@ DEFAULT_CONFIG = {
         "images/cook_1_pan.png",
         # クッキング開始は出てくる途中で押すと効かないので、出てから 1 秒待って押す
         {"template": "images/cook_2_start.png", "shared": True, "delay": 1.0},
-        "images/flai_spatula.png",
+        # フライ返しは時間制限つきで、見えている間に何度か押す必要がある。
+        # 押し直しが遅いと料理が進まない（5秒だと1皿あたり 8秒→19秒に遅くなった）ので 1 秒ごと
+        {"template": "images/flai_spatula.png", "retry": 1.0},
         "images/cook_4_mitten.png",
     ],
     # アイコンの中心がこの距離（px）以内なら同じコンロとみなす

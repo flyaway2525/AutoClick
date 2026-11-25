@@ -24,7 +24,10 @@
       "shared": true,
       "delay": 1.0
     },
-    "images/flai_spatula.png",
+    {
+      "template": "images/flai_spatula.png",
+      "retry": 1.0
+    },
     "images/cook_4_mitten.png"
   ],
   "cooking_stove_radius": 60,

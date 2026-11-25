@@ -236,7 +236,7 @@ start.bat
 |---|---|---|
 | 1 | `images/cook_1_pan.png` | フライパンのアイコン（コンロの上） |
 | 2 | `images/cook_2_start.png` | 「クッキング開始」ボタン（画面に1つ） |
-| 3 | `images/flai_spatula.png` | フライ返し（出てくるたびに押す） |
+| 3 | `images/flai_spatula.png` | フライ返し（時間制限つき。見えている間は 1 秒ごとに押す） |
 | 4 | `images/cook_4_mitten.png` | ミトン（これで料理完了） |
 
 ### ON / OFF
@@ -287,7 +287,7 @@ start.bat
 "cooking_steps": [
   "images/cook_1_pan.png",
   {"template": "images/cook_2_start.png", "shared": true, "delay": 1.0},
-  {"template": "images/flai_spatula.png", "retry": 0.3},
+  {"template": "images/flai_spatula.png", "retry": 1.0},
   "images/cook_4_mitten.png"
 ],
 "cooking_stove_radius": 60,
